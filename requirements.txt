@@ -29,7 +29,7 @@ langchain-text-splitters==0.3.11
 # MCP and OpenAI
 mcp==1.14.0
 openai==1.107.2
-
+anyio
 # Utilities
 requests==2.32.5
 beautifulsoup4==4.13.5
