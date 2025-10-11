@@ -24,6 +24,7 @@ class CredentialsManager:
     def save_drive_credentials(self, user_id: str, drive_token: str) -> str:
         """
         Save user's Drive credentials to shared volume.
+        Always overwrites existing credentials to ensure fresh tokens.
         
         Args:
             user_id: Unique user identifier
@@ -34,7 +35,15 @@ class CredentialsManager:
         """
         # Create user-specific directory
         user_dir = self.base_path / user_id
-        user_dir.mkdir(exist_ok=True)
+        user_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Path to credentials file
+        credentials_path = user_dir / "drive.json"
+        
+        # Remove old credentials if they exist
+        if credentials_path.exists():
+            module_logger.info(f"🔄 Overwriting existing credentials for user {user_id}")
+            credentials_path.unlink()
         
         # Create credentials JSON
         credentials = {
@@ -42,7 +51,6 @@ class CredentialsManager:
         }
         
         # Save to user's directory
-        credentials_path = user_dir / "drive.json"
         with open(credentials_path, 'w') as f:
             json.dump(credentials, f, indent=2)
         
@@ -88,6 +96,34 @@ class GoogleDriveMCPTool(RepositoryTool):
         
         if credentials_path:
             self._initialize_mcp()
+    
+    def _cleanup_old_containers(self):
+        """Clean up old Drive MCP containers for this specific user only."""
+        import subprocess
+        try:
+            # Generate user-specific container name
+            container_name = f"mcp-gdrive-{self._user_id}"
+            
+            module_logger.info(f"Checking for old Drive MCP container: {container_name}")
+            
+            # Check if container with this name exists
+            result = subprocess.run(
+                ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.ID}}"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            if result.stdout.strip():
+                container_id = result.stdout.strip()
+                module_logger.info(f"🧹 Removing old Drive MCP container for user {self._user_id}: {container_id}")
+                subprocess.run(["docker", "rm", "-f", container_id], check=False, capture_output=True)
+                module_logger.info(f"✅ Cleaned up old container: {container_name}")
+            else:
+                module_logger.info(f"No old Drive MCP container found for user {self._user_id}")
+                
+        except Exception as e:
+            module_logger.warning(f"Failed to cleanup old containers: {e}")
 
     def _initialize_mcp(self):
         """Initialize MCP tools if credentials are available."""
@@ -98,6 +134,9 @@ class GoogleDriveMCPTool(RepositoryTool):
             return
 
         try:
+            # Clean up any old Drive MCP containers first
+            self._cleanup_old_containers()
+            
             module_logger.info("Creating Drive MCP toolset...")
 
             # Convert container path to host path for Docker-in-Docker
@@ -112,12 +151,17 @@ class GoogleDriveMCPTool(RepositoryTool):
             # Note: Docker compose creates network with project name prefix
             network_name = os.getenv("DOCKER_NETWORK", "tara-ai-ml-agent_course-agent-network")
             
+            # Use user-specific container name to isolate each user's MCP server
+            container_name = f"mcp-gdrive-{self._user_id}"
+            module_logger.info(f"Creating Drive MCP container: {container_name}")
+            
             server_params = {
                 "command": "docker",
                 "args": [
                     "run",
                     "-i",
                     "--rm",
+                    "--name", container_name,  # Name container by user_id
                     # Mount credentials file from host (for Docker-in-Docker)
                     "--mount", f"type=bind,source={host_credentials_path},target=/credentials.json,readonly",
                     "-e", "GDRIVE_CREDENTIALS_PATH=/credentials.json",
