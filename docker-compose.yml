@@ -9,12 +9,15 @@ services:
     volumes:
       # Mount Docker socket to allow container to run other containers
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/qais_jabbar/drive-credentials:/credentials
+      # - /home/qais_jabbar/drive-credentials:/credentials
+      - /Users/qais/Documents/Hackaton/credentials:/credentials
     environment:
       - PYTHONUNBUFFERED=1
       - CREDENTIALS_BASE_PATH=/credentials
-      - HOST_CREDENTIALS_PATH=/home/qais_jabbar/drive-credentials 
+      # - HOST_CREDENTIALS_PATH=/home/qais_jabbar/drive-credentials 
+      - HOST_CREDENTIALS_PATH=/Users/qais/Documents/Hackaton/credentials
       - DOCKER_NETWORK=tara-ai-ml-agent_course-agent-network 
+    user: "0:0"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]

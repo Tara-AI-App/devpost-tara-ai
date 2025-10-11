@@ -44,6 +44,7 @@ class CourseGenerationAgent:
             os.environ['GITHUB_PERSONAL_ACCESS_TOKEN'] = github_token
         if drive_token:
             os.environ['GOOGLE_DRIVE_TOKEN'] = drive_token
+            os.environ['USER_ID'] = user_id
 
         self.settings = settings
         self.user_id = user_id
@@ -265,22 +266,70 @@ class CourseGenerationAgent:
         - search_code: Search for specific code patterns across GitHub
         - get_file_contents: Extract actual files from repositories
 
-        **GOOGLE DRIVE MCP TOOLS AVAILABLE:**
-        - search_drive: Search for files in Google Drive by name or content
-        - read_file: Read file contents from Google Drive
-        - list_files: List files in a specific Drive folder
-
-        **When to use Google Drive tools:**
-        - User mentions "my Drive", "Google Drive", "shared folder", or "Drive files"
-        - User references specific Drive file names or folders
-        - User wants to include documentation or resources from their Drive
-        - Use Drive tools to supplement GitHub/RAG sources with user's personal documents
-
-        **Drive Integration Strategy:**
-        - If user mentions Drive explicitly: Search Drive FIRST before other sources
-        - If Drive files are found: Include them as primary sources alongside GitHub/RAG
-        - Reference Drive files with proper Drive URLs in source_from array
-        - Extract relevant content from Drive files to enhance course material
+        **GOOGLE DRIVE MCP TOOLS AND RESOURCES:**
+        
+        **Available Tool:**
+        - search: Search for files in Google Drive by name or content
+          * Input: query (string) - Search query
+          * Returns: Text list of file names and MIME types (for discovery only)
+          * Use this to find what files exist by name/content
+        
+        **IMPORTANT - How to Access Drive File Content:**
+        
+        The Google Drive MCP provides files as **MCP Resources** that you can read:
+        
+        1. **Search Tool (Discovery)**: Use `search("filename")` to find files
+           - Returns: Plain text list of matching file names and types
+           - Example: "Found 2 files: Rencana Pengembangan (Google Doc), Proposal (PDF)"
+           - Does NOT return file IDs directly
+        
+        2. **Resources (Reading Content)**: The MCP server exposes files as resources
+           - The ADK framework automatically handles resource access
+           - Resources use URI format: `gdrive:///<file_id>`
+           - When you reference a Drive file, the framework reads it automatically
+           - Google Workspace files are automatically exported:
+             * Google Docs → Markdown format
+             * Google Sheets → CSV format  
+             * Google Presentations → Plain text
+             * Google Drawings → PNG format
+           - Other files (PDF, DOCX, etc.) provided in native format
+        
+        **Correct Workflow for Drive Files:**
+        
+        When user asks about a Drive file:
+        
+        Step 1: Call search("filename or keywords") to discover files
+        Step 2: Identify relevant file(s) from search results
+        Step 3: Tell user what you found
+        Step 4: The MCP framework provides access to file content via resources
+        Step 5: You can reference and use the file content in your response
+        
+        **Example Workflow:**
+        ```
+        User: "Read my document about TARA prototype and summarize it"
+        
+        Action 1: Call search("TARA prototype")
+        Result: "Found: Rencana Pengembangan Prototype - TARA (Google Doc)"
+        
+        Action 2: The framework automatically accesses the resource
+        Result: Document content is available as Markdown
+        
+        Response: "I found your document 'Rencana Pengembangan Prototype - TARA'. 
+        It describes... [summarize based on actual content]"
+        ```
+        
+        **When to use Google Drive:**
+        - User mentions "my Drive", "Google Drive", "Drive files", or "shared folder"
+        - User references specific document names
+        - User asks to "read", "check", "summarize", or "use" a Drive document
+        - User wants to include Drive documents in course generation
+        
+        **Drive Integration for Course Generation:**
+        - Search Drive for relevant onboarding documents, specs, or guides
+        - Use Drive document content as supplementary source material
+        - Include Drive file names in source_from array
+        - Reference Drive documents when explaining concepts
+        - Example: "Based on the 'Onboarding Guide' from your Drive..."
 
         **CRITICAL - SOURCE VALIDATION (PREVENT HALLUCINATION):**
 

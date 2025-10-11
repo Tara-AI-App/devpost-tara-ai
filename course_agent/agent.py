@@ -1,9 +1,15 @@
 from .agents.course_agent import create_course_agent, CourseGenerationAgent
 from .config.settings import settings
 from .utils.logger import logger
+import os
 
 # Create the main agent instance for backward compatibility
-course_agent_instance = create_course_agent()
+# Read tokens from environment variables for adk web usage
+course_agent_instance = create_course_agent(
+    github_token=os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN'),
+    drive_token=os.getenv('GOOGLE_DRIVE_TOKEN'),
+    user_id=os.getenv('USER_ID', 'default-user')
+)
 
 # Export the ADK agent for backward compatibility with existing code
 root_agent = course_agent_instance.get_agent()
@@ -24,7 +30,11 @@ def get_agent_status():
 def reload_configuration():
     """Reload configuration and recreate agent."""
     global course_agent_instance, root_agent
-    course_agent_instance = create_course_agent()
+    course_agent_instance = create_course_agent(
+        github_token=os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN'),
+        drive_token=os.getenv('GOOGLE_DRIVE_TOKEN'),
+        user_id=os.getenv('USER_ID')
+    )
     root_agent = course_agent_instance.get_agent()
     logger.info("Agent configuration reloaded")
 
