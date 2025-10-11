@@ -17,6 +17,14 @@ except ImportError:
 # Import ADK course agent
 from course_agent.agents.course_agent import create_course_agent
 from course_agent.tools.drive_tool import CredentialsManager
+from course_agent.agents.json_processor_agent import create_json_processor_agent
+
+# Import follow_up_agent
+from follow_up_agent.agent import root_agent
+
+# Import ADK runner for follow_up_agent
+from google.adk.runners import InMemoryRunner
+from google.genai import types as genai_types
 
 app = FastAPI(title="Course Generator API", version="1.0.0")
 
@@ -24,6 +32,9 @@ app = FastAPI(title="Course Generator API", version="1.0.0")
 # Use ./credentials for local dev, /credentials for Docker
 CREDENTIALS_BASE_PATH = os.getenv("CREDENTIALS_BASE_PATH", "./credentials")
 credentials_manager = CredentialsManager(base_path=CREDENTIALS_BASE_PATH)
+
+# Initialize follow_up_agent runner
+follow_up_runner = InMemoryRunner(agent=root_agent, app_name="follow_up_agent")
 
 # Ensure required environment variables are set
 if not os.getenv("GOOGLE_CLOUD_PROJECT"):
@@ -76,6 +87,30 @@ class CourseResponse(BaseModel):
     source_from: List[str]
     difficulty: str
     skills: List[str]
+
+# Follow-up agent models (ADK API server pattern)
+class MessagePart(BaseModel):
+    text: str
+
+class Message(BaseModel):
+    parts: List[MessagePart]
+    role: str
+
+class RunRequest(BaseModel):
+    app_name: str
+    user_id: str
+    session_id: str
+    new_message: Message
+
+class SessionRequest(BaseModel):
+    pass  # Empty body for session creation
+
+class SessionResponse(BaseModel):
+    status: str
+    message: str
+    user_id: str = None
+    session_id: str = None
+    app_name: str = None
 
 def repair_json_string(json_str: str) -> str:
     """
@@ -183,7 +218,16 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
             except json.JSONDecodeError as e:
                 raise e
 
-    # Strategy 1: Try to find JSON in markdown code blocks with ```json
+    # Strategy 1: Try to find JSON in markdown code blocks with ```json (non-greedy)
+    json_block_pattern = r'```json\s*(\{.*?\})\s*```'
+    match = re.search(json_block_pattern, text, re.DOTALL)
+    if match:
+        try:
+            return try_parse_json(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 1b: Try again with greedy matching for complete JSON
     json_block_pattern = r'```json\s*(\{.*\})\s*```'
     match = re.search(json_block_pattern, text, re.DOTALL)
     if match:
@@ -192,7 +236,16 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
-    # Strategy 2: Try to find JSON in code blocks with ```
+    # Strategy 2: Try to find JSON in code blocks with ``` (non-greedy)
+    code_block_pattern = r'```\s*(\{.*?\})\s*```'
+    match = re.search(code_block_pattern, text, re.DOTALL)
+    if match:
+        try:
+            return try_parse_json(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 2b: Try again with greedy matching
     code_block_pattern = r'```\s*(\{.*\})\s*```'
     match = re.search(code_block_pattern, text, re.DOTALL)
     if match:
@@ -246,6 +299,67 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
             return try_parse_json(text.strip())
         except json.JSONDecodeError:
             raise ValueError("Could not extract valid JSON from agent response")
+
+
+async def _process_with_json_agent(raw_response: str) -> Dict[str, Any]:
+    """
+    Process raw course agent response through JSON processor agent.
+    Uses ADK output_schema for guaranteed structured output.
+    """
+    from google.adk.runners import InMemoryRunner
+    from google.genai import types
+    import uuid
+
+    # Create JSON processor agent
+    json_agent = create_json_processor_agent()
+    runner = InMemoryRunner(agent=json_agent)
+
+    # Generate IDs
+    user_id = str(uuid.uuid4())
+    session_id = str(uuid.uuid4())
+
+    # Create session
+    await runner.session_service.create_session(
+        user_id=user_id,
+        session_id=session_id,
+        app_name=runner.app_name
+    )
+
+    # Send raw response to processor
+    new_message = types.Content(
+        role="user",
+        parts=[types.Part(text=f"Convert this course content to JSON:\n\n{raw_response}")]
+    )
+
+    # Run processor and get structured output
+    async for event in runner.run_async(
+        user_id=user_id,
+        session_id=session_id,
+        new_message=new_message
+    ):
+        # The output_schema ensures we get structured data
+        if hasattr(event, 'content') and event.content:
+            if hasattr(event.content, 'parts'):
+                for part in event.content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        # With output_schema, the text is JSON-formatted
+                        try:
+                            return json.loads(part.text)
+                        except json.JSONDecodeError:
+                            # Try the next part
+                            continue
+
+    # Get from session state (output_key='processed_course')
+    session = await runner.session_service.get_session(
+        user_id=user_id,
+        session_id=session_id,
+        app_name=runner.app_name
+    )
+
+    if hasattr(session, 'state') and 'processed_course' in session.state:
+        return session.state['processed_course']
+
+    raise ValueError("JSON processor agent did not return structured output")
 
 
 async def _run_agent_with_tools_async(agent, prompt: str) -> str:
@@ -344,15 +458,26 @@ async def generate_course(request: CourseRequest):
         if not response_text or response_text.strip() == "":
             raise ValueError("Agent returned empty response. Check that GOOGLE_CLOUD_PROJECT is set correctly.")
 
-        # Try to extract JSON from the response
+        # Process through JSON processor agent (uses output_schema for guaranteed structure)
         try:
-            course_json = extract_json_from_text(response_text)
-        except ValueError as e:
-            # Log the actual response for debugging
-            print(f"❌ Failed to extract JSON. Response length: {len(response_text)} chars")
-            print(f"📄 First 1000 chars:\n{response_text[:1000]}\n")
-            print(f"📄 Last 500 chars:\n{response_text[-500:]}\n")
-            raise e
+            print(f"📝 Processing response through JSON processor agent...")
+            print(f"   Response length: {len(response_text)} chars")
+            course_json = await _process_with_json_agent(response_text)
+            print(f"✅ JSON processing successful")
+        except Exception as e:
+            # Fallback to manual extraction if processor fails
+            print(f"⚠️  JSON processor failed: {e}")
+            print(f"   Falling back to manual JSON extraction...")
+            try:
+                course_json = extract_json_from_text(response_text)
+                print(f"✅ Manual extraction successful")
+            except ValueError as fallback_error:
+                # Log the actual response for debugging
+                print(f"❌ Both JSON processor and manual extraction failed")
+                print(f"📄 Response length: {len(response_text)} chars")
+                print(f"📄 First 1000 chars:\n{response_text[:1000]}\n")
+                print(f"📄 Last 500 chars:\n{response_text[-500:]}\n")
+                raise fallback_error
 
         # Validate required top-level fields
         required_fields = ['title', 'description', 'difficulty', 'learning_objectives', 'modules', 'source_from']
@@ -422,12 +547,169 @@ async def generate_course(request: CourseRequest):
             detail=f"Course generation failed: {str(e)}"
         )
 
+# Follow-up agent endpoints (ADK API server pattern)
+@app.post("/apps/{app_name}/users/{user_id}/sessions/{session_id}", response_model=SessionResponse)
+async def create_session(app_name: str, user_id: str, session_id: str, request: SessionRequest):
+    """
+    Create or update a session for the follow_up_agent.
+
+    This follows the ADK API server pattern for session management.
+    """
+    try:
+        if app_name != "follow_up_agent":
+            raise HTTPException(status_code=404, detail=f"App '{app_name}' not found")
+
+        # Create session using the runner's session service
+        await follow_up_runner.session_service.create_session(
+            user_id=user_id,
+            session_id=session_id,
+            app_name=app_name
+        )
+
+        return SessionResponse(
+            status="success",
+            message="Session created successfully",
+            user_id=user_id,
+            session_id=session_id,
+            app_name=app_name
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create session: {str(e)}"
+        )
+
+@app.get("/apps/{app_name}/users/{user_id}/sessions/{session_id}")
+async def get_session(app_name: str, user_id: str, session_id: str):
+    """
+    Get session details for the follow_up_agent.
+    """
+    try:
+        if app_name != "follow_up_agent":
+            raise HTTPException(status_code=404, detail=f"App '{app_name}' not found")
+
+        # Get session from the runner's session service
+        session = await follow_up_runner.session_service.get_session(
+            user_id=user_id,
+            session_id=session_id,
+            app_name=app_name
+        )
+
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "session_id": session_id,
+            "app_name": app_name,
+            "session": session
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {str(e)}"
+        )
+
+@app.delete("/apps/{app_name}/users/{user_id}/sessions/{session_id}")
+async def delete_session(app_name: str, user_id: str, session_id: str):
+    """
+    Delete a session for the follow_up_agent.
+    """
+    try:
+        if app_name != "follow_up_agent":
+            raise HTTPException(status_code=404, detail=f"App '{app_name}' not found")
+
+        # Delete session using the runner's session service
+        await follow_up_runner.session_service.delete_session(
+            user_id=user_id,
+            session_id=session_id,
+            app_name=app_name
+        )
+
+        return {
+            "status": "success",
+            "message": "Session deleted successfully"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete session: {str(e)}"
+        )
+
+@app.post("/run")
+async def run_agent(request: RunRequest):
+    """
+    Run the follow_up_agent with a message and return all events.
+
+    This follows the ADK API server pattern for running agents.
+    Returns a JSON array of all events from the agent execution.
+    """
+    try:
+        if request.app_name != "follow_up_agent":
+            raise HTTPException(status_code=404, detail=f"App '{request.app_name}' not found")
+
+        # Convert the request message to ADK format
+        new_message = genai_types.Content(
+            role=request.new_message.role,
+            parts=[genai_types.Part(text=part.text) for part in request.new_message.parts]
+        )
+
+        # Run the agent and collect all events
+        events = []
+        async for event in follow_up_runner.run_async(
+            user_id=request.user_id,
+            session_id=request.session_id,
+            new_message=new_message
+        ):
+            # Convert event to dict format for JSON response
+            event_dict = {
+                "content": {}
+            }
+
+            if hasattr(event, 'content') and event.content:
+                event_dict["content"]["role"] = event.content.role if hasattr(event.content, 'role') else None
+                event_dict["content"]["parts"] = []
+
+                if hasattr(event.content, 'parts'):
+                    for part in event.content.parts:
+                        part_dict = {}
+                        if hasattr(part, 'text') and part.text:
+                            part_dict["text"] = part.text
+                        if hasattr(part, 'functionCall') and part.functionCall:
+                            part_dict["functionCall"] = {
+                                "name": part.functionCall.name,
+                                "args": dict(part.functionCall.args) if hasattr(part.functionCall, 'args') else {}
+                            }
+                        if hasattr(part, 'functionResponse') and part.functionResponse:
+                            part_dict["functionResponse"] = {
+                                "name": part.functionResponse.name,
+                                "response": dict(part.functionResponse.response) if hasattr(part.functionResponse, 'response') else {}
+                            }
+                        event_dict["content"]["parts"].append(part_dict)
+
+            events.append(event_dict)
+
+        return events
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Agent execution failed: {str(e)}"
+        )
+
 @app.get("/")
 async def root():
     """
     Root endpoint for health check.
     """
-    return {"message": "Course Generator API is running"}
+    return {
+        "message": "Course Generator API is running",
+        "endpoints": {
+            "course_generation": "/course/generate",
+            "follow_up_agent": {
+                "create_session": "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
+                "run": "/run"
+            }
+        }
+    }
 
 @app.post("/debug/agent-status")
 async def debug_agent_status(request: CourseRequest):
