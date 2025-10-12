@@ -52,10 +52,14 @@ class CourseGenerationAgent:
         self.source_manager = SourceManager()
         self.source_tracker = EnhancedSourceTracker()
 
-        # Initialize Drive tool separately if user_id and drive_token are provided
+        # Initialize Drive tool separately if enabled and credentials are provided
         self.drive_tool = None
-        if user_id and drive_token:
+        if self.settings.mcp.enable_drive_mcp and user_id and drive_token:
             self._initialize_drive_tool()
+        elif not self.settings.mcp.enable_drive_mcp:
+            logger.info("Google Drive MCP is disabled via ENABLE_DRIVE_MCP config")
+        elif not user_id or not drive_token:
+            logger.info("Google Drive MCP not initialized: missing user_id or drive_token")
 
         self.agent = self._create_agent()
 

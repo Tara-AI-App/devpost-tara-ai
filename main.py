@@ -19,6 +19,9 @@ from course_agent.agents.course_agent import create_course_agent
 from course_agent.tools.drive_tool import CredentialsManager
 from course_agent.agents.json_processor_agent import create_json_processor_agent
 
+# Import guide_agent
+from guide_agent.agents.guide_agent import create_guide_agent
+
 # Import follow_up_agent
 from follow_up_agent.agent import root_agent
 
@@ -87,6 +90,18 @@ class CourseResponse(BaseModel):
     source_from: List[str]
     difficulty: str
     skills: List[str]
+
+class GuideRequest(BaseModel):
+    user_id: str
+    token_github: str
+    token_drive: str
+    prompt: str
+
+class GuideResponse(BaseModel):
+    title: str
+    description: str
+    content: str
+    source_from: List[str] = []
 
 # Follow-up agent models (ADK API server pattern)
 class MessagePart(BaseModel):
@@ -418,6 +433,86 @@ async def _run_agent_with_tools_async(agent, prompt: str) -> str:
     return response_text
 
 
+@app.post("/guide/generate", response_model=GuideResponse)
+async def generate_guide(request: GuideRequest):
+    """
+    Generate a guide using the ADK guide agent.
+
+    This endpoint:
+    1. Creates a guide agent with the provided GitHub and Drive tokens
+    2. Saves Drive credentials if provided
+    3. Sends the user's prompt to the agent using InMemoryRunner
+    4. Extracts and returns the generated guide JSON
+    """
+    drive_credentials_path = None
+
+    try:
+        # Save user's Drive credentials to shared volume if provided
+        if request.token_drive:
+            drive_credentials_path = credentials_manager.save_drive_credentials(
+                user_id=request.user_id,
+                drive_token=request.token_drive
+            )
+            print(f"📁 Drive credentials saved for user {request.user_id} at: {drive_credentials_path}")
+
+        # Create guide agent with provided tokens and user_id
+        guide_agent_instance = create_guide_agent(
+            github_token=request.token_github if request.token_github else None,
+            drive_token=request.token_drive if request.token_drive else None,
+            user_id=request.user_id
+        )
+
+        # Get the ADK agent
+        agent = guide_agent_instance.get_agent()
+
+        # Run agent with full tool support
+        response_text = await _run_agent_with_tools_async(agent, request.prompt)
+
+        # If response is empty, provide helpful error
+        if not response_text or response_text.strip() == "":
+            raise ValueError("Agent returned empty response. Check that GOOGLE_CLOUD_PROJECT is set correctly.")
+
+        # Extract JSON from response
+        try:
+            print(f"📝 Extracting JSON from guide response...")
+            print(f"   Response length: {len(response_text)} chars")
+            guide_json = extract_json_from_text(response_text)
+            print(f"✅ JSON extraction successful")
+        except ValueError as e:
+            # Log the actual response for debugging
+            print(f"❌ JSON extraction failed")
+            print(f"📄 Response length: {len(response_text)} chars")
+            print(f"📄 First 1000 chars:\n{response_text[:1000]}\n")
+            print(f"📄 Last 500 chars:\n{response_text[-500:]}\n")
+            raise e
+
+        # Validate required fields for guide
+        required_fields = ['title', 'description', 'content']
+        missing_fields = [f for f in required_fields if f not in guide_json]
+        if missing_fields:
+            raise ValueError(f"Agent response missing required fields: {missing_fields}")
+
+        # Ensure source_from is a list (optional field with default)
+        if 'source_from' not in guide_json:
+            guide_json['source_from'] = []
+        elif not isinstance(guide_json.get('source_from'), list):
+            guide_json['source_from'] = []
+
+        # Validate and return the guide
+        return GuideResponse(**guide_json)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse guide from agent response: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Guide generation failed: {str(e)}"
+        )
+
+
 @app.post("/course/generate", response_model=CourseResponse)
 async def generate_course(request: CourseRequest):
     """
@@ -701,8 +796,9 @@ async def root():
     Root endpoint for health check.
     """
     return {
-        "message": "Course Generator API is running",
+        "message": "Course & Guide Generator API is running",
         "endpoints": {
+            "guide_generation": "/guide/generate",
             "course_generation": "/course/generate",
             "follow_up_agent": {
                 "create_session": "/apps/{app_name}/users/{user_id}/sessions/{session_id}",

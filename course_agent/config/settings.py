@@ -29,11 +29,16 @@ class MCPConfig:
         "search_repositories",
         "get_file_contents",
         "search_code",
-        "list_projects"
+        "list_projects",
+        "get_me"
     ])
     max_repositories: int = 2  # Reduced from 5 to 2 for faster performance
     max_code_results: int = 10
     quality_threshold: int = 100  # Minimum stars for repository consideration
+
+    # Google Drive MCP toggle
+    enable_drive_mcp: bool = field(default_factory=lambda: os.getenv('ENABLE_DRIVE_MCP', 'false').lower() == 'true')
+    drive_token: Optional[str] = field(default_factory=lambda: os.getenv('GOOGLE_DRIVE_TOKEN'))
 
 
 @dataclass
