@@ -105,6 +105,7 @@ class CourseGenerationAgent:
             FunctionTool(self.analyze_tech_stack),
             FunctionTool(self.discover_sources),
             FunctionTool(self.extract_repository_content),
+            FunctionTool(self.extract_drive_content),
             FunctionTool(self.get_tracked_sources),
             FunctionTool(self.determine_difficulty),
             FunctionTool(self.generate_search_queries),
@@ -136,18 +137,10 @@ class CourseGenerationAgent:
         drive_available = self.drive_tool and self.drive_tool.is_available()
         logger.info(f"Drive tool is_available(): {drive_available}")
 
+        # Note: Drive tools are called directly via search_drive_resources() method
+        # We don't add them as ADK tools since we use subprocess to call the MCP server
         if drive_available:
-            # Add the Drive MCP toolset
-            drive_mcp_toolset = self.drive_tool._mcp_tools
-            logger.info(f"Retrieved Drive MCP toolset: {drive_mcp_toolset}")
-            logger.info(f"Drive MCP toolset type: {type(drive_mcp_toolset)}")
-
-            if drive_mcp_toolset:
-                tools.append(drive_mcp_toolset)
-                logger.info("Google Drive MCP toolset added to agent")
-                logger.info(f"Total tools count: {len(tools)}")
-            else:
-                logger.warning("Drive MCP toolset is None")
+            logger.info("Google Drive tools are available (via direct MCP server calls)")
         else:
             logger.warning("Google Drive MCP tools not available")
 
@@ -182,19 +175,19 @@ class CourseGenerationAgent:
 
         **CONTENT DISCOVERY PROCESS:**
 
-        **⚠️ STEP 0: MANDATORY - ESTABLISH GITHUB USER CONTEXT (ALWAYS DO THIS FIRST) ⚠️**
-        - **BEFORE doing anything else, call get_me to get the authenticated GitHub username**
+        **STEP 0 (OPTIONAL): ESTABLISH GITHUB USER CONTEXT (if get_me is available)**
+        - If the get_me tool is available, you MAY call it to get the authenticated GitHub username
         - This establishes context for which GitHub account is connected
         - Store the username for later repository searches
         - Example: get_me returns {{"login": "Reynxzz"}} → username is "Reynxzz"
-        - **DO THIS EVEN IF** you think you might not need GitHub later
-        - **WHY**: When user says "graphflix", you'll know to search "Reynxzz/graphflix" not just "graphflix"
+        - If get_me is NOT available, skip this step and proceed to discover_sources
+        - **Note**: The discover_sources tool already handles GitHub searches automatically
 
-        **STEP 0.5: MANDATORY - GET USER'S REPO LIST FOR CONTEXT**
-        - After get_me, **YOU MUST call**: search_repositories("user:<username>") to list all user's repos
-        - This returns the complete list of repositories with full details (name, url, description)
-        - **IMPORTANT**: Save this list! You will use it later to find exact matches
-        - Example: search_repositories("user:gemm123") → returns: [{{name: "bytesv2", url: "...", full_name: "gemm123/bytesv2"}}, ...]
+        **STEP 0.5 (OPTIONAL): GET USER'S REPO LIST FOR CONTEXT**
+        - If you called get_me successfully, you MAY call: search_repositories("user:<username>")
+        - This returns the complete list of repositories with full details
+        - Save this list to help find exact matches later
+        - If you didn't call get_me, skip this step
         - This list IS your source of truth for what repos exist
         - When user asks about a project, match against this list to get the exact repository object
 
@@ -202,8 +195,8 @@ class CourseGenerationAgent:
         ```
         User: "Generate course about graphflix"
 
-        Step 0: Call get_me → returns {{"login": "Reynxzz"}}
-                Store username: "Reynxzz"
+        Step 0 (Optional): Try get_me → if available, returns {{"login": "Reynxzz"}}
+                          If not available, skip to Step 1
 
         Step 1: Call discover_sources("graphflix")
                 → github_results_count = 0 (because automatic search failed)
@@ -246,10 +239,10 @@ class CourseGenerationAgent:
            - Do this EVEN IF RAG or Google found sources
            - Why: User's personal repository is the PRIMARY source for their project
            - Steps:
-             1. Use the username from get_me (called in Step 0)
-             2. Call search_repositories with "repo:<username>/<projectname>"
+             1. If you have username from get_me: search_repositories("repo:<username>/<projectname>")
+             2. If no username: try search_repositories("<projectname>") or search_repositories("in:name <projectname>")
              3. If found: Use repository as PRIMARY source (not RAG/Google)
-           - Example: "capstone-seis-flask" → search_repositories("repo:Reynxzz/capstone-seis-flask")
+           - Example: "capstone-seis-flask" → search_repositories("repo:Reynxzz/capstone-seis-flask") OR search_repositories("capstone-seis-flask")
            - Do NOT skip this because RAG/Google already found something
 
         4. **Decision logic based on ACTUAL results**:
@@ -264,76 +257,106 @@ class CourseGenerationAgent:
         **RAG TOOL (PRIORITY TOOL):**
         - discover_sources: Search internal knowledge base and documentation for relevant context
 
-        **GITHUB MCP TOOLS AVAILABLE (FALLBACK TOOLS):**
-        - get_me: Get the authenticated GitHub user's profile
+        **GITHUB MCP TOOLS (if available):**
+        GitHub integration may provide these tools when connected:
         - search_repositories: Find repositories by name, description, topics, readme
         - search_code: Search for specific code patterns across GitHub
         - get_file_contents: Extract actual files from repositories
+        - get_me: Get the authenticated GitHub user's profile (optional)
+        
+        Note: Use only GitHub tools that are actually available. Don't assume all are present.
 
-        **GOOGLE DRIVE MCP TOOLS AND RESOURCES:**
+        **GOOGLE DRIVE INTEGRATION:**
         
         **Available Tool:**
-        - search: Search for files in Google Drive by name or content
-          * Input: query (string) - Search query
-          * Returns: Text list of file names and MIME types (for discovery only)
-          * Use this to find what files exist by name/content
         
-        **IMPORTANT - How to Access Drive File Content:**
+        **extract_drive_content(search_query: str)** - Search and extract Drive file content
+           * Input: search_query (string) - Search query for Drive files
+           * Returns: Dict with file contents, metadata, and matched files
+           * Example: extract_drive_content("TARA prototype")
+           * **Automatically searches Drive and extracts content in one call**
+           * Returns structured data with all matched files and their contents
         
-        The Google Drive MCP provides files as **MCP Resources** that you can read:
+        **How It Works:**
+        The extract_drive_content tool automatically:
+        1. Searches Google Drive for files matching your query
+        2. Extracts content from up to 5 matching files
+        3. Returns structured data with file names, content, and metadata
         
-        1. **Search Tool (Discovery)**: Use `search("filename")` to find files
-           - Returns: Plain text list of matching file names and types
-           - Example: "Found 2 files: Rencana Pengembangan (Google Doc), Proposal (PDF)"
-           - Does NOT return file IDs directly
-        
-        2. **Resources (Reading Content)**: The MCP server exposes files as resources
-           - The ADK framework automatically handles resource access
-           - Resources use URI format: `gdrive:///<file_id>`
-           - When you reference a Drive file, the framework reads it automatically
-           - Google Workspace files are automatically exported:
-             * Google Docs → Markdown format
-             * Google Sheets → CSV format  
-             * Google Presentations → Plain text
-             * Google Drawings → PNG format
-           - Other files (PDF, DOCX, etc.) provided in native format
-        
-        **Correct Workflow for Drive Files:**
-        
-        When user asks about a Drive file:
-        
-        Step 1: Call search("filename or keywords") to discover files
-        Step 2: Identify relevant file(s) from search results
-        Step 3: Tell user what you found
-        Step 4: The MCP framework provides access to file content via resources
-        Step 5: You can reference and use the file content in your response
-        
-        **Example Workflow:**
+        **Usage Example:**
         ```
-        User: "Read my document about TARA prototype and summarize it"
+        User: "Generate course about TARA prototype development"
         
-        Action 1: Call search("TARA prototype")
-        Result: "Found: Rencana Pengembangan Prototype - TARA (Google Doc)"
+        Call: extract_drive_content("TARA prototype")
         
-        Action 2: The framework automatically accesses the resource
-        Result: Document content is available as Markdown
+        Returns:
+        {{
+          "files_found": 5,
+          "content": [
+            {{"name": "Rencana Pengembangan Prototype - TARA", "content": "...", "length": 5234}},
+            {{"name": "Ionify - Tara BI Hackaton", "content": "...", "length": 12345}}
+          ],
+          "source_urls": [
+            "https://drive.google.com/file/d/11E-BABqB4XscV7-9oZVg3MKqjjo_oPcGjxsxrTrfn9Q/view",
+            "https://drive.google.com/file/d/15MwrpzIgLWDZxhNMcn-U5NEtzkQWHdQ-KfFbmyvQiqs/view"
+          ],
+          "matched_files": ["File 1", "File 2", "File 3"],
+          "summary": "Successfully extracted content from 5 of 5 matched files"
+        }}
         
-        Response: "I found your document 'Rencana Pengembangan Prototype - TARA'. 
-        It describes... [summarize based on actual content]"
+        → Use the URLs from source_urls in your source_from array
         ```
         
-        **When to use Google Drive:**
-        - User mentions "my Drive", "Google Drive", "Drive files", or "shared folder"
-        - User references specific document names
-        - User asks to "read", "check", "summarize", or "use" a Drive document
-        - User wants to include Drive documents in course generation
+        **Complete Workflow for Course Generation with Drive:**
         
-        **Drive Integration for Course Generation:**
-        - Search Drive for relevant onboarding documents, specs, or guides
-        - Use Drive document content as supplementary source material
-        - Include Drive file names in source_from array
-        - Reference Drive documents when explaining concepts
-        - Example: "Based on the 'Onboarding Guide' from your Drive..."
+        ```
+        User: "Generate course about TARA prototype development"
+        
+        SEQUENCE:
+        
+        1. discover_sources("TARA prototype")
+           → Returns: RAG results + GitHub repos
+        
+        2. extract_drive_content("TARA prototype")
+           → Searches Drive and extracts file contents automatically
+           → Returns full content from matched files with metadata
+        
+        3. Generate course using ALL sources:
+           - RAG knowledge base (from step 1)
+           - GitHub code examples (from step 1)  
+           - Drive document content (from step 2)
+        
+        4. Add to source_from array (use Drive links from source_urls):
+           ["github.com/ionify/tara", 
+            "https://drive.google.com/file/d/11E-BABqB4XscV7-9oZVg3MKqjjo_oPcGjxsxrTrfn9Q/view",
+            "https://drive.google.com/file/d/15MwrpzIgLWDZxhNMcn-U5NEtzkQWHdQ-KfFbmyvQiqs/view"]
+        ```
+        
+        **Rules:**
+        1. Call extract_drive_content() when you need Drive files for a topic
+        2. Use specific queries for better results (e.g., "TARA prototype" vs "TARA")
+        3. The tool returns source_urls with clickable Drive links
+        4. File contents are automatically extracted and ready to use
+        5. **IMPORTANT**: Add Drive links from source_urls to source_from array (not file names)
+        
+        **Drive Content Types (Automatically Converted):**
+        - Google Docs → Markdown (use directly in lessons)
+        - Google Sheets → CSV (extract data/examples)
+        - PDFs → Text (get specifications/proposals)
+        - DOCX → Text (read documentation)
+        
+        **⚠️ KEY PRINCIPLES (MUST FOLLOW) ⚠️:**
+        1. **USE**: Call extract_drive_content() to search and get Drive files in one step
+        2. **SPECIFIC**: Use specific queries for better results (e.g., "TARA prototype" not just "TARA")
+        3. **SILENT**: Don't announce files to user - use content automatically
+        4. **ATTRIBUTION**: Add Drive file names to source_from array
+        5. **SEQUENCE**: discover_sources → extract_drive_content → generate course
+        
+        **Example of CORRECT Drive Usage:**
+        ```
+        ✅ extract_drive_content("TARA")     // Automatically searches and extracts
+        ✅ Use content in course generation   // Generate with the content
+        ```
 
         **CRITICAL - SOURCE VALIDATION (PREVENT HALLUCINATION):**
 
@@ -354,7 +377,7 @@ class CourseGenerationAgent:
            - discover_sources searches user's GitHub automatically (via source_manager)
            - If github_results_count > 0: Use those GitHub repos
            - If github_results_count = 0: Repo not found OR needs manual search
-           - Only if not found: Try manual search with get_me + search_repositories
+           - Only if not found: Try manual search with search_repositories (use get_me username if available)
            - If still not found: Acknowledge it doesn't exist, don't make it up
 
         3. **Ambiguous queries** (e.g., "graphflix"):
@@ -419,8 +442,8 @@ class CourseGenerationAgent:
         ```
         1. User asks: "Generate course about graphflix project"
         2. Call discover_sources → github_results_count = 0
-        3. Call get_me → returns "Reynxzz"
-        4. Call search_repositories("repo:Reynxzz/graphflix") → finds repository
+        3. If get_me available: Call get_me → returns "Reynxzz"
+        4. Call search_repositories("repo:Reynxzz/graphflix") OR search_repositories("graphflix") → finds repository
         5. NOW EXTRACT FILES (critical step):
            - Call get_file_contents(repository="Reynxzz/graphflix", file_path="README.md")
            - Call get_file_contents(repository="Reynxzz/graphflix", file_path="package.json")
@@ -433,8 +456,9 @@ class CourseGenerationAgent:
 
         **MANDATORY SEARCH STRATEGY - ALWAYS TRY USER'S GITHUB REPO:**
 
-        **REMINDER: You should have already called get_me in STEP 0 at the start**
-        - If you didn't call get_me yet, call it NOW before proceeding
+        **Note: get_me is optional - if available, use it to get the username**
+        - If get_me is available and you haven't called it yet, try calling it now
+        - If get_me is not available, proceed without username context
 
         **When user mentions a specific project name** (like "graphflix", "thinktok", "zyo-deploy"):
 
@@ -483,8 +507,8 @@ class CourseGenerationAgent:
 
         **Examples of CORRECT Execution**:
         ```
-        Step 0: get_me → username = "gemm123"
-        Step 0.5: search_repositories("user:gemm123") →
+        Step 0 (Optional): If get_me available → username = "gemm123"
+        Step 0.5 (Optional): If username available, search_repositories("user:gemm123") →
                   Returns: [
                     {{name: "bytesv2", full_name: "gemm123/bytesv2", url: "..."}},
                     {{name: "graphflix", full_name: "gemm123/graphflix", url: "..."}},
@@ -541,9 +565,9 @@ class CourseGenerationAgent:
 
         **IMPORTANT EFFICIENCY RULES**:
         - Always prioritize RAG tool (internal context) first using discover_sources
-        - GitHub search automatically scopes to the authenticated user's repositories
-        - The system handles get_me and user scoping automatically - no manual intervention needed
-        - If discover_sources returns results, proceed directly to course generation
+        - GitHub search automatically scopes to the authenticated user's repositories when possible
+        - The get_me tool is optional - if not available, proceed without it
+        - If discover_sources returns sufficient results, proceed directly to course generation
         - Always prefer internal RAG context over external GitHub sources when available
 
         **COURSE GENERATION REQUIREMENTS:**
@@ -767,6 +791,128 @@ class CourseGenerationAgent:
         except Exception as e:
             logger.error(f"Repository content extraction failed: {e}")
             return {}
+
+    async def extract_drive_content(self, search_query: str) -> Dict[str, Any]:
+        """
+        Search and extract content from Google Drive files.
+        
+        This tool automatically:
+        1. Uses MCP search tool to find relevant files
+        2. Lists all Drive resources to get file URIs
+        3. Matches search results with resources
+        4. Retrieves the file content via MCP resources
+        5. Returns formatted content ready for course generation
+        
+        Args:
+            search_query: Keywords to search for in Drive (e.g., "TARA prototype", "onboarding guide")
+            
+        Returns:
+            Dict containing:
+            - files_found: Number of matching files with extracted content
+            - content: List of dicts with 'name', 'content', 'type' for each file
+            - source_urls: List of file names for source_from tracking
+            - search_results: Original search results for reference
+            
+        Example:
+            result = await extract_drive_content("TARA prototype")
+            # Returns content from "Rencana Pengembangan Prototype - TARA" document
+        """
+        logger.info(f"🔍 Extracting Drive content for query: {search_query}")
+        
+        if not self.drive_tool or not self.drive_tool.is_available():
+            logger.warning("Drive tool not available")
+            return {
+                "files_found": 0,
+                "content": [],
+                "source_urls": [],
+                "error": "Google Drive integration not available"
+            }
+        
+        try:
+            # New workflow: Use search tool directly (searches file names and content)
+            logger.info(f"Step 1: Searching Drive for '{search_query}'...")
+            matched_files = await self.drive_tool.search_files(search_query)
+            
+            if not matched_files:
+                logger.warning(f"No Drive files found matching '{search_query}'")
+                return {
+                    "files_found": 0,
+                    "content": [],
+                    "source_urls": [],
+                    "message": f"No files found matching '{search_query}'"
+                }
+            
+            logger.info(f"✅ Found {len(matched_files)} files matching query")
+            
+            # Step 2: Extract content from matched files
+            logger.info("Step 2: Extracting content from matched files...")
+            extracted_content = []
+            source_urls = []
+            
+            for matched_file in matched_files[:5]:  # Limit to 5 files
+                try:
+                    uri = matched_file.get("uri")
+                    name = matched_file.get("name")
+                    mime_type = matched_file.get("mimeType")
+                    
+                    if not uri:
+                        logger.warning(f"⚠️ No URI for file: {name}")
+                        continue
+                    
+                    logger.info(f"📄 Reading: {name}")
+                    
+                    # Get file content using new get_file method
+                    file_data = await self.drive_tool.get_file(uri)
+                    
+                    if file_data and file_data.get("content"):
+                        content_text = file_data.get("content", "")
+                        extracted_content.append({
+                            "name": name,
+                            "content": content_text,
+                            "type": mime_type,
+                            "uri": uri,
+                            "length": len(content_text)
+                        })
+                        
+                        # Convert gdrive:///fileId to Google Drive view link
+                        # URI format: gdrive:///15MwrpzIgLWDZxhNMcn-U5NEtzkQWHdQ-KfFbmyvQiqs
+                        file_id = uri.replace("gdrive:///", "")
+                        drive_view_link = f"https://drive.google.com/file/d/{file_id}/view"
+                        source_urls.append(drive_view_link)
+                        
+                        logger.info(f"✅ Extracted {len(content_text)} chars from: {name}")
+                        logger.info(f"📎 Drive link: {drive_view_link}")
+                    else:
+                        logger.warning(f"⚠️ No content extracted from: {name}")
+                    
+                except Exception as e:
+                    logger.warning(f"❌ Failed to read {matched_file.get('name', 'unknown')}: {e}")
+                    continue
+            
+            # Step 3: Return results
+            result = {
+                "files_found": len(extracted_content),
+                "content": extracted_content,
+                "source_urls": source_urls,
+                "matched_files": [f.get("name", "unknown") for f in matched_files],
+                "total_matched": len(matched_files),
+                "summary": f"Successfully extracted content from {len(extracted_content)} of {len(matched_files)} matched files"
+            }
+            
+            logger.info(f"🎉 {result['summary']}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Drive content extraction failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "files_found": 0,
+                "content": [],
+                "source_urls": [],
+                "error": str(e),
+                "fallback": f"Failed to extract Drive content for query '{search_query}'"
+            }
 
     def get_tracked_sources(self) -> List[str]:
         """Get all tracked source URLs and paths."""
