@@ -131,22 +131,14 @@ class GuideGenerationAgent:
         else:
             logger.warning("GitHub MCP tools not available")
 
-        # Add Google Drive MCP tools if available
+        # Note: Drive tools are called directly via extract_drive_content() method
+        # We don't add them as ADK tools since we use subprocess to call the MCP server
         logger.info(f"Checking if Google Drive MCP tools are available...")
         drive_available = self.drive_tool and self.drive_tool.is_available()
         logger.info(f"Drive tool is_available(): {drive_available}")
 
         if drive_available:
-            drive_mcp_toolset = self.drive_tool._mcp_tools
-            logger.info(f"Retrieved Drive MCP toolset: {drive_mcp_toolset}")
-            logger.info(f"Drive MCP toolset type: {type(drive_mcp_toolset)}")
-
-            if drive_mcp_toolset:
-                tools.append(drive_mcp_toolset)
-                logger.info("Google Drive MCP toolset added to guide agent")
-                logger.info(f"Total tools count: {len(tools)}")
-            else:
-                logger.warning("Drive MCP toolset is None")
+            logger.info("Google Drive tools are available (via direct MCP server calls)")
         else:
             logger.warning("Google Drive MCP tools not available")
 
