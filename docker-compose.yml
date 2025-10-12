@@ -17,6 +17,7 @@ services:
       - HOST_CREDENTIALS_PATH=/home/qais_jabbar/drive-credentials 
       # - HOST_CREDENTIALS_PATH=/Users/qais/Documents/Hackaton/credentials
       - DOCKER_NETWORK=tara-ai-ml-agent_course-agent-network 
+      - ENABLE_DRIVE_MCP=true
     # user: "0:0"
     restart: unless-stopped
     healthcheck:
