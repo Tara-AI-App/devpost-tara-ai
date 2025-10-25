@@ -214,7 +214,7 @@ async def run_adk_agent(
         async def execute_agent():
             async with httpx.AsyncClient(timeout=300.0) as client:
                 # Step 1: Create session
-                session_url = f"http://localhost:8000/adk/apps/{app_name}/users/{user_id}/sessions/{session_id}"
+                session_url = f"https://agent.taraai.tech/adk/apps/{app_name}/users/{user_id}/sessions/{session_id}"
                 session_response = await client.post(session_url, json={})
 
                 if session_response.status_code != 200:
@@ -224,7 +224,7 @@ async def run_adk_agent(
                     )
 
                 # Step 2: Run agent via ADK's /run endpoint
-                run_url = "http://localhost:8000/adk/run"
+                run_url = "https://agent.taraai.tech/adk/run"
                 run_payload = {
                     "app_name": app_name,
                     "user_id": user_id,
