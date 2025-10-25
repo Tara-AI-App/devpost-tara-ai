@@ -173,21 +173,68 @@ class GuideGenerationAgent:
 
         **CONTENT DISCOVERY PROCESS:**
 
-        **⚠️ STEP 0: MANDATORY - ESTABLISH GITHUB USER CONTEXT (ALWAYS DO THIS FIRST) ⚠️**
-        - **BEFORE doing anything else, call get_me to get the authenticated GitHub username**
+        **⚠️ CRITICAL FIRST STEPS - DO THESE BEFORE ANYTHING ELSE:**
+
+        **STEP 0 (MANDATORY): ESTABLISH GITHUB USER CONTEXT**
+        - **YOU MUST ALWAYS call get_me FIRST** to get the authenticated GitHub username
         - This establishes context for which GitHub account is connected
         - Store the username for later repository searches
         - Example: get_me returns {{"login": "Reynxzz"}} → username is "Reynxzz"
-        - **DO THIS EVEN IF** you think you might not need GitHub later
-        - **WHY**: When user says "graphflix", you'll know to search "Reynxzz/graphflix" not just "graphflix"
+        - **DO NOT SKIP THIS STEP** - it's critical for finding user repositories
+        - If get_me fails, log a warning but continue to discover_sources
 
-        **STEP 0.5: MANDATORY - GET USER'S REPO LIST FOR CONTEXT**
-        - After get_me, **YOU MUST call**: search_repositories("user:<username>") to list all user's repos
-        - This returns the complete list of repositories with full details (name, url, description)
-        - **IMPORTANT**: Save this list! You will use it later to find exact matches
-        - Example: search_repositories("user:gemm123") → returns: [{{name: "bytesv2", url: "...", full_name: "gemm123/bytesv2"}}, ...]
+        **STEP 0.5 (MANDATORY): GET USER'S ORGANIZATIONS**
+        - **Call get_teams()** (no parameters needed - uses authenticated user)
+        - This returns all teams the user belongs to, each with organization info
+        - Extract organization names from the response: team.organization.login
+        - **Save the list of organization names** (e.g., ["ionify", "github", ...])
+
+        **STEP 0.6 (MANDATORY): GET ALL REPOSITORIES (PERSONAL + ORG)**
+        - **You MUST search ALL of these**:
+          1. search_repositories("user:<username>") - lists personal repos
+          2. For EACH organization from get_teams: search_repositories("org:<orgname>")
+        - This returns the complete list of repositories with full details
+        - **Save this combined list!** You will use it later to find exact matches
         - This list IS your source of truth for what repos exist
         - When user asks about a project, match against this list to get the exact repository object
+        - **DO NOT SKIP THIS STEP** - without it you cannot find user's org repos
+
+        **Example Flow:**
+        ```
+        User: "Create guide about Tara project"
+
+        Step 0 (MANDATORY): Call get_me
+                → Returns: {{"login": "gemm123", "type": "User"}}
+
+        Step 0.5 (MANDATORY): Call get_teams()
+                → Returns: [
+                    {{"name": "Developers", "slug": "developers", "organization": {{"login": "ionify"}}}},
+                    {{"name": "Core", "slug": "core", "organization": {{"login": "qore-tara"}}}}
+                ]
+                → Extract orgs: ["ionify", "qore-tara"]
+
+        Step 0.6 (MANDATORY): Get ALL repos
+                → Call search_repositories("user:gemm123")
+                    Returns: [
+                        {{"name": "personal-project", "full_name": "gemm123/personal-project"}},
+                        ...
+                    ]
+                → Call search_repositories("org:ionify")
+                    Returns: [
+                        {{"name": "project-a", "full_name": "ionify/project-a"}},
+                        ...
+                    ]
+                → Call search_repositories("org:qore-tara")
+                    Returns: [
+                        {{"name": "tara-ai-ml-agent", "full_name": "qore-tara/tara-ai-ml-agent"}},
+                        ...
+                    ]
+                → SAVE combined list of ALL repos (personal + all orgs)
+
+        Step 1: Now match "Tara project" against the saved list
+                → Found match: "qore-tara/tara-ai-ml-agent"
+                → Use this exact repository for content
+        ```
 
         **STEP 1: Tech Stack Analysis**
         - Call `analyze_tech_stack(topic: str)` with the user's requested topic
@@ -197,16 +244,23 @@ class GuideGenerationAgent:
         - Call `discover_sources(topic: str)` with the topic
         - This automatically searches multiple sources in priority order
         - Returns a dictionary with counts: total_sources_found, rag_results_count, github_results_count, etc.
+        - **IMPORTANT**: After discover_sources, the source tracker will have recorded the sources
 
         **STEP 3: Extract Repository Content (If Using GitHub)**
-        - If you found relevant GitHub repositories, call `extract_repository_content(repository: str, file_patterns: List[str])`
-        - Provide the repository name and list of file paths to extract
+        - When you identify relevant repositories from STEP 0.6, extract their content
+        - Call `extract_repository_content(repository: str, file_patterns: List[str])`
+        - Provide the FULL repository name (e.g., "qore-tara/tara-ai-ml-agent")
+        - **CRITICAL**: This step automatically tracks the repository URL (e.g., "https://github.com/qore-tara/tara-ai-ml-agent")
         - Returns file contents for reference
 
         **STEP 4: Track Sources**
         - **ALWAYS call `get_tracked_sources()` BEFORE generating the final JSON**
         - This returns the ACTUAL source URLs that were discovered and used
+        - **The source_from field MUST contain repository URLs, NOT file paths**
+        - Example of CORRECT sources: ["https://github.com/qore-tara/tara-ai-ml-agent", "https://example.com/article"]
+        - Example of WRONG sources: ["examples/model.json", "src/main.py"] ← These are file paths, NOT URLs!
         - **NEVER invent or hallucinate source paths**
+        - If get_tracked_sources() returns file paths instead of URLs, you must convert them to repository URLs
 
         **OUTPUT FORMAT:**
         Generate a guide in JSON format with ONLY these fields:
@@ -343,12 +397,25 @@ class GuideGenerationAgent:
             raise
 
     async def extract_repository_content(self, repository: str, file_patterns: List[str]) -> Dict[str, str]:
-        """Extract specific content from a repository."""
+        """Extract specific content from a repository and track the source."""
         logger.info(f"Extracting content from repository: {repository}")
 
         try:
             content = await self.source_manager.get_repository_content(repository, file_patterns)
             logger.info(f"Extracted {len(content)} files from {repository}")
+
+            # Track the GitHub repository as a source (with full URL)
+            if content:
+                repo_url = f"https://github.com/{repository}"
+                # Combine all content for tracking
+                combined_content = "\n".join(content.values())
+                self.source_tracker.add_mcp_source(
+                    content=combined_content,
+                    repository=repository,
+                    url=repo_url
+                )
+                logger.info(f"Tracked GitHub source: {repo_url}")
+
             return content
         except Exception as e:
             logger.error(f"Repository content extraction failed: {e}")

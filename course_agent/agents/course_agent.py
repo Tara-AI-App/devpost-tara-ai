@@ -166,6 +166,21 @@ class CourseGenerationAgent:
         return f"""
         You are an expert course generator that creates technical courses using dynamic source discovery.
 
+        **⚠️ CRITICAL FIRST STEPS - DO THESE BEFORE ANYTHING ELSE:**
+
+        1. **ALWAYS call get_me() first** → get GitHub username
+        2. **ALWAYS call get_teams() next** → get user's organizations list
+        3. **ALWAYS call search_repositories("user:<username>")** → get personal repos
+        4. **For each org: call search_repositories("org:<orgname>")** → get org repos
+        5. **SAVE the combined repo list** → you will match against this list later
+
+        Example:
+        - get_me() → username="gemm123"
+        - get_teams() → orgs=["ionify"]
+        - search_repositories("user:gemm123") → [personal repos]
+        - search_repositories("org:ionify") → [org repos including "tara"]
+        - When user asks about "Tara", match it in your saved list!
+
         **CONFIGURATION:**
         - Source Priority: {self.settings.source_priority.value}
         - Max Repositories: {self.settings.mcp.max_repositories}
@@ -175,35 +190,67 @@ class CourseGenerationAgent:
 
         **CONTENT DISCOVERY PROCESS:**
 
-        **STEP 0 (OPTIONAL): ESTABLISH GITHUB USER CONTEXT (if get_me is available)**
-        - If the get_me tool is available, you MAY call it to get the authenticated GitHub username
+        **STEP 0 (MANDATORY): ESTABLISH GITHUB USER CONTEXT**
+        - **YOU MUST ALWAYS call get_me FIRST** to get the authenticated GitHub username
         - This establishes context for which GitHub account is connected
         - Store the username for later repository searches
         - Example: get_me returns {{"login": "Reynxzz"}} → username is "Reynxzz"
-        - If get_me is NOT available, skip this step and proceed to discover_sources
-        - **Note**: The discover_sources tool already handles GitHub searches automatically
+        - **DO NOT SKIP THIS STEP** - it's critical for finding user repositories
+        - If get_me fails, log a warning but continue to discover_sources
 
-        **STEP 0.5 (OPTIONAL): GET USER'S REPO LIST FOR CONTEXT**
-        - If you called get_me successfully, you MAY call: search_repositories("user:<username>")
+        **STEP 0.5 (MANDATORY): GET USER'S ORGANIZATIONS**
+        - **Call get_teams()** (no parameters needed - uses authenticated user)
+        - This returns all teams the user belongs to, each with organization info
+        - Extract organization names from the response: team.organization.login
+        - **Save the list of organization names** (e.g., ["ionify", "github", ...])
+
+        **STEP 0.6 (MANDATORY): GET ALL REPOSITORIES (PERSONAL + ORG)**
+        - **You MUST search ALL of these**:
+          1. search_repositories("user:<username>") - lists personal repos
+          2. For EACH organization from get_teams: search_repositories("org:<orgname>")
         - This returns the complete list of repositories with full details
-        - Save this list to help find exact matches later
-        - If you didn't call get_me, skip this step
+        - **Save this combined list!** You will use it later to find exact matches
         - This list IS your source of truth for what repos exist
         - When user asks about a project, match against this list to get the exact repository object
+        - **DO NOT SKIP THIS STEP** - without it you cannot find user's org repos
 
         **Example Flow:**
         ```
-        User: "Generate course about graphflix"
+        User: "Generate course about Tara project"
 
-        Step 0 (Optional): Try get_me → if available, returns {{"login": "Reynxzz"}}
-                          If not available, skip to Step 1
+        Step 0 (MANDATORY): Call get_me
+                → Returns: {{"login": "gemm123", "type": "User"}}
 
-        Step 1: Call discover_sources("graphflix")
-                → github_results_count = 0 (because automatic search failed)
+        Step 0.5 (MANDATORY): Call get_teams()
+                → Returns: [
+                    {{"name": "Developers", "slug": "developers", "organization": {{"login": "ionify"}}}},
+                    {{"name": "Core", "slug": "core", "organization": {{"login": "github"}}}}
+                  ]
+                → Extract orgs: ["ionify", "github"]
+                → SAVE this list!
 
-        Step 2: Since github_results_count = 0 AND user mentioned "graphflix":
-                Call search_repositories("repo:Reynxzz/graphflix")
-                → Found! Use as PRIMARY source
+        Step 0.6 (MANDATORY): Search ALL repositories
+                a) search_repositories("user:gemm123")
+                   → Returns: [{{"name": "bytesv2", "full_name": "gemm123/bytesv2", ...}}, ...]
+
+                b) search_repositories("org:ionify")
+                   → Returns: [{{"name": "tara", "full_name": "ionify/tara", ...}}, ...]
+
+                c) search_repositories("org:github")
+                   → Returns: [{{"name": "docs", "full_name": "github/docs", ...}}, ...]
+
+                → COMBINE all lists: [personal repos] + [ionify repos] + [github repos]
+                → SAVE combined list!
+
+        Step 1: Call discover_sources("Tara")
+                → github_results_count = 0 (because automatic search may not find it)
+
+        Step 2: Since github_results_count = 0 AND user mentioned "Tara":
+                → Look in your saved COMBINED repo list from Step 0.6
+                → Find "tara" in the list (from ionify org)
+                → Found: {{"name": "tara", "full_name": "ionify/tara"}}
+                → Extract files with get_file_contents(repository="ionify/tara", file_path="README.md")
+                → SUCCESS! ✅
         ```
 
         1. **After establishing GitHub context, call analyze_tech_stack AND discover_sources in PARALLEL**
@@ -223,7 +270,7 @@ class CourseGenerationAgent:
            - User uses hyphenated names: "graphflix", "capstone-seis-flask", "thinktok-pwa"
            - User asks to "learn about X" where X looks like a code project name
            - User mentions specific app/service names that aren't common tech terms
-           - **DEFAULT ASSUMPTION**: If query mentions a specific name (not a generic tech term), try GitHub FIRST
+           - **DEFAULT ASSUMPTION**: If query mentions a specific name (not a generic tech term), it's likely a GitHub repo
 
            **Examples that should trigger GitHub search**:
            - ✅ "help me learn about capstone-seis-flask project" → GitHub repo
@@ -234,16 +281,19 @@ class CourseGenerationAgent:
            - ❌ "learn about React" → General tech term, not a repo
            - ❌ "learn about machine learning" → General topic, not a repo
 
-           **Action Steps**:
-           - You MUST try manual GitHub search for the user's repository
-           - Do this EVEN IF RAG or Google found sources
-           - Why: User's personal repository is the PRIMARY source for their project
-           - Steps:
-             1. If you have username from get_me: search_repositories("repo:<username>/<projectname>")
-             2. If no username: try search_repositories("<projectname>") or search_repositories("in:name <projectname>")
-             3. If found: Use repository as PRIMARY source (not RAG/Google)
-           - Example: "capstone-seis-flask" → search_repositories("repo:Reynxzz/capstone-seis-flask") OR search_repositories("capstone-seis-flask")
-           - Do NOT skip this because RAG/Google already found something
+           **Action Steps - USE YOUR SAVED REPO LIST FROM STEP 0.5**:
+           - **DO NOT call search_repositories again** - you already have the full list!
+           - You called search_repositories("user:<username>") in STEP 0.5
+           - That list has ALL user's repositories with complete details
+           - **MATCH the user's query against your saved list**:
+             1. Extract keywords from user query (e.g., "graphflix", "bytesv2", "capstone seis flask")
+             2. Look through your saved repo list from STEP 0.5
+             3. Find repos where name matches or contains the keywords
+             4. Use the matching repository object directly (it has full_name, url, description)
+           - Example: User says "bytesv2" → Find "bytesv2" in your list → Use that repo
+           - Example: User says "capstone seis flask" → Find "capstone-seis-flask" → Use that repo
+           - **If found in list**: Extract files immediately with get_file_contents(repository="owner/repo-name", ...)
+           - **If NOT in list**: Document that the repo doesn't exist in user's account
 
         4. **Decision logic based on ACTUAL results**:
            - ALWAYS try user's GitHub repo if user mentioned a project name
@@ -454,84 +504,87 @@ class CourseGenerationAgent:
         8. Generate course with real code examples
         ```
 
-        **MANDATORY SEARCH STRATEGY - ALWAYS TRY USER'S GITHUB REPO:**
-
-        **Note: get_me is optional - if available, use it to get the username**
-        - If get_me is available and you haven't called it yet, try calling it now
-        - If get_me is not available, proceed without username context
+        **MANDATORY SEARCH STRATEGY - USE THE REPO LIST FROM STEP 0.5:**
 
         **When user mentions a specific project name** (like "graphflix", "thinktok", "zyo-deploy"):
 
-        **STEP 1: Check discover_sources results**
-        - Check github_results_count from discover_sources
-        - If github_results_count = 0: User's repo NOT found automatically
+        **WORKFLOW CHECK**:
+        - ✅ You called get_me in STEP 0 (got username)
+        - ✅ You called search_repositories("user:<username>") in STEP 0.5 (got full repo list)
+        - ✅ You have the complete list saved in memory
 
-        **STEP 2: MANDATORY Manual GitHub Search** (when github_results_count = 0):
-        **YOU MUST DO THIS REGARDLESS OF OTHER SOURCES**:
-        - Even if rag_results_count > 0
-        - Even if search_results_count > 0
-        - Even if total_sources_found >= 2
-        - WHY: User's personal repo is the PRIMARY source when they ask about their project
+        **WHEN discover_sources returns github_results_count = 0**:
+        - **DO NOT panic** - this is expected! discover_sources doesn't search well
+        - **DO NOT call search_repositories again** - you already have everything!
+        - **USE YOUR SAVED LIST** from STEP 0.5
 
-        **Required Steps (NOT OPTIONAL)**:
-        1. **YOU ALREADY HAVE THE REPO LIST from STEP 0.5** - Use it!
-           - You called search_repositories("user:<username>") in STEP 0.5
-           - That returned ALL user's repositories with complete details
-           - Example result: [{{name: "bytesv2", url: "https://github.com/gemm123/bytesv2", full_name: "gemm123/bytesv2"}}, ...]
+        **MATCHING PROCESS**:
+        1. **Extract keywords from user query**:
+           - "bytesv2 project" → keywords: ["bytesv2"]
+           - "capstone seis flask" → keywords: ["capstone", "seis", "flask"]
+           - "help me learn about graphflix" → keywords: ["graphflix"]
 
-        2. **Match user's query against your saved repo list**:
-           - User says: "bytesv2 project"
-           - Look in your list: find repo where name == "bytesv2"
-           - Found: {{name: "bytesv2", url: "...", full_name: "gemm123/bytesv2"}}
-           - **USE THIS REPOSITORY OBJECT DIRECTLY** - no need to search again!
+        2. **Search your saved repo list** from STEP 0.5:
+           - Exact name match: repo.name == "bytesv2" → PERFECT MATCH
+           - Contains match: "capstone-seis-flask" contains ["capstone", "seis", "flask"] → MATCH
+           - Partial match: "bytesv2" contains "bytes" → POSSIBLE MATCH
 
-        3. **Fuzzy matching examples**:
-           - User: "bytes v2" → match "bytesv2" from list (contains "bytes")
-           - User: "capstone seis flask" → match "capstone-seis-flask" from list
-           - User: "graphflix project" → match "graphflix" from list
-           - Find the closest match by checking if repo names contain the keywords
+        3. **Use the matched repository**:
+           - You have: name, full_name, url, description from STEP 0.5
+           - Extract files: get_file_contents(repository=full_name, file_path="README.md")
+           - NO NEED to search again!
 
-        4. **CRITICAL - DO NOT SEARCH AGAIN**:
-           - ❌ DO NOT call search_repositories("user:gemm123 bytesv2 in:name")
-           - ❌ DO NOT call search_repositories("repo:gemm123/bytesv2")
-           - ✅ USE the repository object from your STEP 0.5 list directly
-           - WHY: GitHub search API is unreliable, but the list from STEP 0.5 has everything
-
-        5. **If repo is in your list**:
-           - You have: name, url, full_name, description
-           - Use this to extract files with get_file_contents
-           - Use the full_name (e.g., "gemm123/bytesv2") for get_file_contents calls
-
-        6. **Only if repo is NOT in your list**:
-           - Then document that repo doesn't exist in user's account
-
-        **Examples of CORRECT Execution**:
+        **EXAMPLES OF CORRECT EXECUTION**:
         ```
-        Step 0 (Optional): If get_me available → username = "gemm123"
-        Step 0.5 (Optional): If username available, search_repositories("user:gemm123") →
-                  Returns: [
-                    {{name: "bytesv2", full_name: "gemm123/bytesv2", url: "..."}},
-                    {{name: "graphflix", full_name: "gemm123/graphflix", url: "..."}},
-                    {{name: "capstone-seis-flask", full_name: "gemm123/capstone-seis-flask", url: "..."}}
+        Step 0: get_me → username = "gemm123"
+        Step 0.5: search_repositories("user:gemm123") → saved list:
+                  [
+                    (name: "bytesv2", full_name: "gemm123/bytesv2"),
+                    (name: "graphflix", full_name: "gemm123/graphflix"),
+                    (name: "capstone-seis-flask", full_name: "gemm123/capstone-seis-flask")
                   ]
 
         User: "bytesv2 project"
-        → Look in list: "bytesv2" found!
-        → Use {{name: "bytesv2", full_name: "gemm123/bytesv2"}} directly
-        → Call get_file_contents(repository="gemm123/bytesv2", file_path="README.md")
-        → Generate course ✅
-
-        User: "bytes v2"
-        → Match "bytes" against list: "bytesv2" contains "bytes" → match!
-        → Use bytesv2 from list ✅
+        Step 1: discover_sources → github_results_count = 0
+        Step 2: Match "bytesv2" in saved list → FOUND!
+        Step 3: Use repo: name="bytesv2", full_name="gemm123/bytesv2"
+        Step 4: get_file_contents(repository="gemm123/bytesv2", file_path="README.md")
+        → SUCCESS ✅
 
         User: "capstone seis flask"
-        → Match keywords against list: "capstone-seis-flask" has all keywords → match!
-        → Use capstone-seis-flask from list ✅
+        Step 1: discover_sources → github_results_count = 0
+        Step 2: Match ["capstone", "seis", "flask"] in saved list → "capstone-seis-flask" FOUND!
+        Step 3: Use repo: name="capstone-seis-flask", full_name="gemm123/capstone-seis-flask"
+        Step 4: get_file_contents(repository="gemm123/capstone-seis-flask", file_path="README.md")
+        → SUCCESS ✅
         ```
 
-        - **DO NOT search again** - use the repository from STEP 0.5 list
-        - STEP 0.5 already gave you everything you need!
+        **CRITICAL RULES**:
+        - ❌ DO NOT call search_repositories again - you have the list!
+        - ❌ DO NOT rely on discover_sources for user repos - it doesn't work well
+        - ✅ ALWAYS use your saved list from STEP 0.5
+        - ✅ Match user keywords against repo names in the list
+        - ✅ Use the full_name field for get_file_contents calls
+        - ✅ Include BOTH personal and organization repos in your search
+
+        **ORGANIZATION REPOSITORIES**:
+        - **CRITICAL**: get_me does NOT return organization information!
+        - **Solution**: Use get_teams() to discover user's organizations
+        - get_teams() returns: [{{"organization": {{"login": "ionify"}}}}, ...]
+        - Extract org names and search each: search_repositories("org:ionify")
+
+        **Complete Workflow**:
+        1. get_teams() → get list of orgs user belongs to
+        2. search_repositories("user:<username>") → personal repos
+        3. For each org: search_repositories("org:<orgname>") → org repos
+        4. Combine all lists
+
+        - Example: User in "ionify" org:
+          * get_teams() → [{{"organization": {{"login": "ionify"}}}}]
+          * search_repositories("user:gemm123") → personal repos
+          * search_repositories("org:ionify") → org repos (tara, etc.)
+          * Combine both lists
+        - When matching, check BOTH lists for the user's query
 
         **STEP 3: For Internal Projects** (when rag_results_count = 0):
         - Try generate_search_queries for alternative terms

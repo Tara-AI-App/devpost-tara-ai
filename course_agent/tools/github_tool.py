@@ -74,7 +74,8 @@ class GitHubMCPTool(RepositoryTool):
                     "search_repositories",
                     "get_file_contents",
                     "search_code",
-                    "get_me"
+                    "get_me",
+                    "get_teams"  # Get user's teams/organizations
                 ],
             )
 

@@ -30,7 +30,8 @@ class MCPConfig:
         "get_file_contents",
         "search_code",
         "list_projects",
-        "get_me"
+        "get_me",
+        "get_teams"  # Get user's teams/organizations for org repo discovery
     ])
     max_repositories: int = 2  # Reduced from 5 to 2 for faster performance
     max_code_results: int = 10
