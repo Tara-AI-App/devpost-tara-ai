@@ -186,12 +186,12 @@ async def run_adk_agent(
     max_retries: int = 3
 ) -> str:
     """
-    Call ADK's /run endpoint internally to execute the agent with retry logic.
-
+    Execute agent using InMemoryRunner directly (no HTTP calls).
+    
     This function:
     1. Sets tokens in environment (for this request)
-    2. Creates a session
-    3. Calls ADK's /run endpoint with exponential backoff retry on rate limits
+    2. Creates agent instance with user-specific tokens
+    3. Runs agent via InMemoryRunner
     4. Extracts and returns the final text response
     """
     # Store original tokens
@@ -212,68 +212,64 @@ async def run_adk_agent(
 
         # Define the agent execution logic to be retried
         async def execute_agent():
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                # Step 1: Create session
-                session_url = f"https://agent.taraai.tech/adk/apps/{app_name}/users/{user_id}/sessions/{session_id}"
-                session_response = await client.post(session_url, json={})
+            # Import agent based on app_name
+            if app_name == "course_agent":
+                from course_agent.agents.course_agent import create_course_agent
+                agent_instance = create_course_agent(
+                    github_token=github_token,
+                    drive_token=drive_token,
+                    user_id=user_id
+                )
+                agent = agent_instance.get_agent()
+                runner = InMemoryRunner(agent=agent, app_name="course_agent")
+            elif app_name == "guide_agent":
+                from guide_agent.agents.guide_agent import create_guide_agent
+                agent_instance = create_guide_agent(
+                    github_token=github_token,
+                    drive_token=drive_token,
+                    user_id=user_id
+                )
+                agent = agent_instance.get_agent()
+                runner = InMemoryRunner(agent=agent, app_name="guide_agent")
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Unknown app: {app_name}"
+                )
 
-                if session_response.status_code != 200:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to create session: {session_response.text}"
-                    )
+            # Step 1: Create session
+            await runner.session_service.create_session(
+                user_id=user_id,
+                session_id=session_id,
+                app_name=app_name
+            )
 
-                # Step 2: Run agent via ADK's /run endpoint
-                run_url = "https://agent.taraai.tech/adk/run"
-                run_payload = {
-                    "app_name": app_name,
-                    "user_id": user_id,
-                    "session_id": session_id,
-                    "new_message": {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "text": prompt
-                            }
-                        ]
-                    }
-                }
+            # Step 2: Run agent
+            new_message = genai_types.Content(
+                role="user",
+                parts=[genai_types.Part(text=prompt)]
+            )
 
-                run_response = await client.post(run_url, json=run_payload)
+            # Collect events and extract final text
+            final_text = None
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=new_message
+            ):
+                if hasattr(event, 'content') and event.content:
+                    if hasattr(event.content, 'parts'):
+                        for part in event.content.parts:
+                            if hasattr(part, 'text') and part.text:
+                                final_text = part.text
 
-                if run_response.status_code != 200:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Agent execution failed: {run_response.text}"
-                    )
+            if not final_text:
+                raise HTTPException(
+                    status_code=500,
+                    detail="No text response from agent"
+                )
 
-                # Step 3: Extract final text from events
-                events = run_response.json()
-
-                if not isinstance(events, list):
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Unexpected response format from ADK"
-                    )
-
-                # Find the last text response
-                final_text = None
-                for event in reversed(events):
-                    if 'content' in event and 'parts' in event['content']:
-                        for part in event['content']['parts']:
-                            if 'text' in part and part['text']:
-                                final_text = part['text']
-                                break
-                    if final_text:
-                        break
-
-                if not final_text:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="No text response from agent"
-                    )
-
-                return final_text
+            return final_text
 
         # Execute with retry logic
         return await retry_with_exponential_backoff(execute_agent, max_retries=max_retries)
