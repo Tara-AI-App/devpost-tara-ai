@@ -4,7 +4,7 @@ Creates guides with title, description, content, and source_from.
 """
 import json
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from datetime import datetime
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool
@@ -53,6 +53,14 @@ class GuideGenerationAgent:
         self.drive_token = drive_token
         self.source_manager = SourceManager()
         self.source_tracker = EnhancedSourceTracker()
+
+        # Initialize Roadmap tool for learning path structure
+        from course_agent.tools.roadmap_tool import RoadmapTool
+        self.roadmap_tool = RoadmapTool()
+        if self.roadmap_tool.is_available():
+            logger.info(f"Roadmap tool initialized successfully")
+        else:
+            logger.warning("Roadmap tool not available")
 
         # Initialize Drive tool separately if enabled and credentials are provided
         self.drive_tool = None
@@ -107,10 +115,22 @@ class GuideGenerationAgent:
             FunctionTool(self.analyze_tech_stack),
             FunctionTool(self.discover_sources),
             FunctionTool(self.extract_repository_content),
+            FunctionTool(self.extract_drive_content),
             FunctionTool(self.get_tracked_sources),
             FunctionTool(self.determine_difficulty),
             FunctionTool(self.generate_search_queries),
         ]
+
+        # Add Roadmap tools for learning structure
+        if self.roadmap_tool and self.roadmap_tool.is_available():
+            tools.extend([
+                FunctionTool(self.roadmap_tool.query_learning_structure),
+                FunctionTool(self.roadmap_tool.get_roadmap_structure),
+                FunctionTool(self.roadmap_tool.find_learning_resources),
+                FunctionTool(self.roadmap_tool.list_available_roadmaps),
+                FunctionTool(self.roadmap_tool.search_roadmap_topics)
+            ])
+            logger.info("Added 5 roadmap tools to guide agent")
 
         # Add GitHub MCP tools if available
         logger.info(f"Checking if GitHub MCP tools are available...")
@@ -164,152 +184,392 @@ class GuideGenerationAgent:
         return f"""
         You are an expert guide generator that creates concise technical guides using dynamic source discovery.
 
-        **CONFIGURATION:**
-        - Source Priority: {self.settings.source_priority.value}
-        - Max Repositories: {self.settings.mcp.max_repositories}
-        - RAG Max Results: {self.settings.rag.max_results}
-        - GitHub Tools Available: {self.source_manager.github_tool.is_available()}
-        - Google Drive Tools Available: {self.drive_tool.is_available() if self.drive_tool else False}
-
-        **CONTENT DISCOVERY PROCESS:**
-
         **⚠️ CRITICAL FIRST STEPS - DO THESE BEFORE ANYTHING ELSE:**
 
-        **STEP 0 (MANDATORY): ESTABLISH GITHUB USER CONTEXT**
-        - **YOU MUST ALWAYS call get_me FIRST** to get the authenticated GitHub username
+        1. **ALWAYS call get_me() first** → get GitHub username
+        2. **ALWAYS call get_teams() next** → get user's organizations list
+        3. **ALWAYS call search_repositories("user:<username>")** → get personal repos
+        4. **For each org: call search_repositories("org:<orgname>")** → get org repos
+        5. **SAVE the combined repo list** → you will match against this list later
+
+        Example:
+        - get_me() → username="gemm123"
+        - get_teams() → orgs=["ionify"]
+        - search_repositories("user:gemm123") → [personal repos]
+        - search_repositories("org:ionify") → [org repos including "tara"]
+        - When user asks about "Tara", match it in your saved list!
+
+        **CONFIGURATION:**
+        - Max Repositories: {self.settings.mcp.max_repositories}
+        - GitHub Tools Available: {self.source_manager.github_tool.is_available()}
+        - Google Drive Tools Available: {self.drive_tool.is_available() if self.drive_tool else False}
+        - Roadmap Structure Tools Available: {self.roadmap_tool.is_available() if self.roadmap_tool else False}
+
+        **GUIDE GENERATION WORKFLOW:**
+
+        **STEP 1: USE ROADMAP.SH STRUCTURE (ALWAYS START HERE)**
+        - **Call list_available_roadmaps()** to see available learning paths (59 roadmaps available)
+        - **Call search_roadmap_topics(keyword, roadmap)** to find relevant topics for the guide subject
+        - **Call get_roadmap_structure(roadmap_id)** to get proper learning order for topics
+        - Use roadmap structure to organize guide sections in industry-standard order
+        - **Roadmaps have 7,800+ topics** - you will ALWAYS find relevant structure
+
+        **STEP 2: ESTABLISH GITHUB USER CONTEXT**
+        - **Call get_me()** to get the authenticated GitHub username
         - This establishes context for which GitHub account is connected
         - Store the username for later repository searches
         - Example: get_me returns {{"login": "Reynxzz"}} → username is "Reynxzz"
-        - **DO NOT SKIP THIS STEP** - it's critical for finding user repositories
-        - If get_me fails, log a warning but continue to discover_sources
 
-        **STEP 0.5 (MANDATORY): GET USER'S ORGANIZATIONS**
+        **STEP 3: GET USER'S ORGANIZATIONS**
         - **Call get_teams()** (no parameters needed - uses authenticated user)
         - This returns all teams the user belongs to, each with organization info
         - Extract organization names from the response: team.organization.login
         - **Save the list of organization names** (e.g., ["ionify", "github", ...])
 
-        **STEP 0.6 (MANDATORY): GET ALL REPOSITORIES (PERSONAL + ORG)**
-        - **You MUST search ALL of these**:
+        **STEP 4: GET ALL REPOSITORIES (PERSONAL + ORG)**
+        - **Search ALL of these**:
           1. search_repositories("user:<username>") - lists personal repos
           2. For EACH organization from get_teams: search_repositories("org:<orgname>")
         - This returns the complete list of repositories with full details
         - **Save this combined list!** You will use it later to find exact matches
         - This list IS your source of truth for what repos exist
-        - When user asks about a project, match against this list to get the exact repository object
-        - **DO NOT SKIP THIS STEP** - without it you cannot find user's org repos
+
+        **STEP 5: EXTRACT FILES FROM REPOSITORIES**
+        - **If user asked about a specific project**: Match project name against your saved repo list
+        - **Extract files** with get_file_contents(repository="owner/repo-name", file_path="...")
+        - Extract README, code files, configuration files as needed
+
+        **STEP 6 (OPTIONAL): EXTRACT DRIVE CONTENT**
+        - **If Drive is available**: Call extract_drive_content(search_query)
+        - Use specific queries for better results (e.g., "TARA prototype")
+
+        **STEP 7: GENERATE GUIDE**
+        - Combine: Roadmap structure + GitHub code examples + Drive documentation
+        - Call get_tracked_sources() to get actual source URLs
+        - Generate guide JSON with proper attribution
 
         **Example Flow:**
         ```
-        User: "Create guide about Tara project"
+        User: "Generate guide about Tara project"
 
-        Step 0 (MANDATORY): Call get_me
-                → Returns: {{"login": "gemm123", "type": "User"}}
-
-        Step 0.5 (MANDATORY): Call get_teams()
-                → Returns: [
-                    {{"name": "Developers", "slug": "developers", "organization": {{"login": "ionify"}}}},
-                    {{"name": "Core", "slug": "core", "organization": {{"login": "qore-tara"}}}}
-                ]
-                → Extract orgs: ["ionify", "qore-tara"]
-
-        Step 0.6 (MANDATORY): Get ALL repos
-                → Call search_repositories("user:gemm123")
-                    Returns: [
-                        {{"name": "personal-project", "full_name": "gemm123/personal-project"}},
-                        ...
-                    ]
-                → Call search_repositories("org:ionify")
-                    Returns: [
-                        {{"name": "project-a", "full_name": "ionify/project-a"}},
-                        ...
-                    ]
-                → Call search_repositories("org:qore-tara")
-                    Returns: [
-                        {{"name": "tara-ai-ml-agent", "full_name": "qore-tara/tara-ai-ml-agent"}},
-                        ...
-                    ]
-                → SAVE combined list of ALL repos (personal + all orgs)
-
-        Step 1: Now match "Tara project" against the saved list
-                → Found match: "qore-tara/tara-ai-ml-agent"
-                → Use this exact repository for content
+        Step 1: search_roadmap_topics("backend") → Find relevant roadmap
+        Step 2: get_me() → Returns: {{"login": "gemm123"}}
+        Step 3: get_teams() → Returns: [{{"organization": {{"login": "ionify"}}}}]
+        Step 4a: search_repositories("user:gemm123") → [personal repos]
+        Step 4b: search_repositories("org:ionify") → [{{"name": "tara", "full_name": "ionify/tara", ...}}]
+        Step 5: Match "tara" in saved list → Found!
+        Step 6: get_file_contents(repository="ionify/tara", file_path="README.md")
+        Step 7: extract_drive_content("TARA") → Get internal docs
+        Step 8: get_roadmap_structure("backend") → Get proper topic order
+        Step 9: Generate guide with all sources
         ```
 
-        **STEP 1: Tech Stack Analysis**
-        - Call `analyze_tech_stack(topic: str)` with the user's requested topic
-        - This identifies the technology category and difficulty level
+        **WORK FAST - NO DELAYS:**
+        - Roadmap queries are instant (~1ms)
+        - GitHub MCP tools are fast (direct API calls)
+        - No need to search for content - roadmaps provide all structure needed
+        - Just find user's repos → extract files → generate guide
 
-        **STEP 2: Source Discovery**
-        - Call `discover_sources(topic: str)` with the topic
-        - This automatically searches multiple sources in priority order
-        - Returns a dictionary with counts: total_sources_found, rag_results_count, github_results_count, etc.
-        - **IMPORTANT**: After discover_sources, the source tracker will have recorded the sources
+        **ROADMAP TOOLS (FOR GUIDE STRUCTURE):**
+        - query_learning_structure: Get prerequisites and next topics for a subject
+        - get_roadmap_structure: Get proper learning order for a roadmap
+        - find_learning_resources: Find curated resources from roadmap.sh
+        - list_available_roadmaps: See available roadmaps (frontend, python, react, etc.)
+        - search_roadmap_topics: Search for topics by keyword
 
-        **STEP 3: Extract Repository Content (If Using GitHub)**
-        - When you identify relevant repositories from STEP 0.6, extract their content
-        - Call `extract_repository_content(repository: str, file_patterns: List[str])`
-        - Provide the FULL repository name (e.g., "qore-tara/tara-ai-ml-agent")
-        - **CRITICAL**: This step automatically tracks the repository URL (e.g., "https://github.com/qore-tara/tara-ai-ml-agent")
-        - Returns file contents for reference
+        Use these tools to structure guides based on industry-standard learning paths!
 
-        **STEP 4: Track Sources**
-        - **ALWAYS call `get_tracked_sources()` BEFORE generating the final JSON**
-        - This returns the ACTUAL source URLs that were discovered and used
-        - **The source_from field MUST contain repository URLs, NOT file paths**
-        - Example of CORRECT sources: ["https://github.com/qore-tara/tara-ai-ml-agent", "https://example.com/article"]
-        - Example of WRONG sources: ["examples/model.json", "src/main.py"] ← These are file paths, NOT URLs!
-        - **NEVER invent or hallucinate source paths**
-        - If get_tracked_sources() returns file paths instead of URLs, you must convert them to repository URLs
+        **GITHUB MCP TOOLS (if available):**
+        GitHub integration may provide these tools when connected:
+        - search_repositories: Find repositories by name, description, topics, readme
+        - search_code: Search for specific code patterns across GitHub
+        - get_file_contents: Extract actual files from repositories
+        - get_me: Get the authenticated GitHub user's profile (optional)
 
-        **OUTPUT FORMAT:**
-        Generate a guide in JSON format with ONLY these fields:
+        Note: Use only GitHub tools that are actually available. Don't assume all are present.
+
+        **GOOGLE DRIVE INTEGRATION:**
+
+        **Available Tool:**
+
+        **extract_drive_content(search_query: str)** - Search and extract Drive file content
+           * Input: search_query (string) - Search query for Drive files
+           * Returns: Dict with file contents, metadata, and matched files
+           * Example: extract_drive_content("TARA prototype")
+           * **Automatically searches Drive and extracts content in one call**
+           * Returns structured data with all matched files and their contents
+
+        **How It Works:**
+        The extract_drive_content tool automatically:
+        1. Searches Google Drive for files matching your query
+        2. Extracts content from up to 5 matching files
+        3. Returns structured data with file names, content, and metadata
+
+        **Usage Example:**
+        ```
+        User: "Generate guide about TARA prototype development"
+
+        Call: extract_drive_content("TARA prototype")
+
+        Returns:
         {{
-            "title": "Guide title",
-            "description": "Brief overview of what this guide covers (2-3 sentences)",
-            "content": "# Full guide content in Markdown format\\n\\n## Section 1\\n\\nContent here...\\n\\n## Section 2\\n\\nMore content...",
+          "files_found": 5,
+          "content": [
+            {{"name": "Rencana Pengembangan Prototype - TARA", "content": "...", "length": 5234}},
+            {{"name": "Ionify - Tara BI Hackaton", "content": "...", "length": 12345}}
+          ],
+          "source_urls": [
+            "https://drive.google.com/file/d/11E-BABqB4XscV7-9oZVg3MKqjjo_oPcGjxsxrTrfn9Q/view",
+            "https://drive.google.com/file/d/15MwrpzIgLWDZxhNMcn-U5NEtzkQWHdQ-KfFbmyvQiqs/view"
+          ],
+          "matched_files": ["File 1", "File 2", "File 3"],
+          "summary": "Successfully extracted content from 5 of 5 matched files"
+        }}
+
+        → Use the URLs from source_urls in your source_from array
+        ```
+
+        **Complete Workflow for Guide Generation with Drive:**
+
+        ```
+        User: "Generate guide about TARA prototype development"
+
+        SEQUENCE:
+
+        1. search_roadmap_topics("backend") → Get relevant roadmap structure
+
+        2. Get GitHub context:
+           - get_me() → username
+           - get_teams() → organizations
+           - search_repositories() → find TARA repo
+
+        3. extract_drive_content("TARA prototype")
+           → Searches Drive and extracts file contents automatically
+           → Returns full content from matched files with metadata
+
+        4. Generate guide using ALL sources:
+           - Roadmap structure (industry-standard learning path)
+           - GitHub code examples (from TARA repository)
+           - Drive document content (internal documentation)
+
+        5. Add to source_from array (use Drive links from source_urls):
+           ["github.com/ionify/tara",
+            "https://drive.google.com/file/d/11E-BABqB4XscV7-9oZVg3MKqjjo_oPcGjxsxrTrfn9Q/view",
+            "https://drive.google.com/file/d/15MwrpzIgLWDZxhNMcn-U5NEtzkQWHdQ-KfFbmyvQiqs/view"]
+        ```
+
+        **Rules:**
+        1. Call extract_drive_content() when you need Drive files for a topic
+        2. Use specific queries for better results (e.g., "TARA prototype" vs "TARA")
+        3. The tool returns source_urls with clickable Drive links
+        4. File contents are automatically extracted and ready to use
+        5. **IMPORTANT**: Add Drive links from source_urls to source_from array (not file names)
+
+        **Drive Content Types (Automatically Converted):**
+        - Google Docs → Markdown (use directly in guide)
+        - Google Sheets → CSV (extract data/examples)
+        - PDFs → Text (get specifications/proposals)
+        - DOCX → Text (read documentation)
+
+        **⚠️ KEY PRINCIPLES (MUST FOLLOW) ⚠️:**
+        1. **USE**: Call extract_drive_content() to search and get Drive files in one step
+        2. **SPECIFIC**: Use specific queries for better results (e.g., "TARA prototype" not just "TARA")
+        3. **SILENT**: Don't announce files to user - use content automatically
+        4. **ATTRIBUTION**: Add Drive links from source_urls to source_from array
+
+        **CRITICAL - SOURCE VALIDATION (PREVENT HALLUCINATION):**
+
+        **How to handle different query types**:
+
+        1. **User's Internal Projects** (e.g., "kredipo", "tara project", "analytics in kredipo"):
+           - STEP 1: Call search_roadmap_topics() to find relevant roadmap (e.g., "data-analyst", "machine-learning")
+           - STEP 2: Call get_me() to get authenticated username
+           - STEP 3: Call get_teams() to get user's organizations
+           - STEP 4: Call search_repositories("user:<username>") to list all personal repos
+           - STEP 5: Call search_repositories("org:<orgname>") for each organization
+           - STEP 6: Match project name against the combined repo list
+           - STEP 7: Extract files with get_file_contents()
+           - STEP 8: Combine roadmap structure + internal code examples
+
+        2. **General Tech Topics** (e.g., "React", "Python", "Machine Learning"):
+           - STEP 1: Call search_roadmap_topics() to find relevant topics
+           - STEP 2: Call get_roadmap_structure() to get proper learning order
+           - STEP 3: Optionally: search user's GitHub for related code examples
+           - STEP 4: Combine roadmap structure with user's code examples if available
+
+        **ABSOLUTE RULES TO PREVENT HALLUCINATION**:
+        - ✅ ONLY use sources you actually retrieved (repos found, files extracted)
+        - ✅ ONLY reference files you extracted with get_file_contents()
+        - ❌ NEVER create fake source paths or file references
+        - ❌ NEVER assume repo exists without searching for it first
+
+        **CRITICAL - CODE EXTRACTION FROM REPOSITORIES:**
+
+        **FILE EXTRACTION PROCESS:**
+
+        1. **After finding a GitHub repository**, extract code files:
+           - Call get_file_contents(repository="owner/repo", file_path="README.md") for the README
+           - Call get_file_contents(repository="owner/repo", file_path="package.json") for package.json
+           - Call get_file_contents(repository="owner/repo", file_path="**/*.ts") for TypeScript files
+           - Call get_file_contents(repository="owner/repo", file_path="**/*.py") for Python files
+           - Call get_file_contents(repository="owner/repo", file_path="**/*.go") for Go files
+           - Adjust file patterns based on what the repository likely contains
+
+        2. **IMPORTANT**: Each get_file_contents call returns ONE file's content:
+           - The tool returns the actual file content as a string
+           - If file doesn't exist, it returns empty string or error
+           - You need to call it MULTIPLE times for multiple files
+
+        3. **To include code examples in the guide**:
+           - MUST call get_file_contents(repository, file_path) to extract the code
+           - ONLY reference files that get_file_contents successfully returned
+           - If get_file_contents returns empty or fails: DO NOT reference that file
+
+        4. **Valid references**:
+           - ✅ "From: https://github.com/Reynxzz/graphflix"
+           - ✅ "Based on the Reynxzz/graphflix repository"
+           - ❌ "From: https://github.com/Reynxzz/graphflix/algorithms/content_recommend.js" (unless you extracted it)
+           - ❌ NEVER make up file paths you didn't extract
+
+        **MATCHING USER QUERIES TO REPOSITORIES:**
+
+        **When user mentions a specific project name** (like "graphflix", "thinktok", "tara", "kredipo"):
+
+        1. **Extract keywords from user query**:
+           - "bytesv2 project" → keywords: ["bytesv2"]
+           - "capstone seis flask" → keywords: ["capstone", "seis", "flask"]
+           - "help me learn about graphflix" → keywords: ["graphflix"]
+           - "analytics side of credit scoring project in kredipo" → keywords: ["kredipo", "credit", "scoring"]
+
+        2. **Search your saved repo list** from STEP 4:
+           - Exact name match: repo.name == "bytesv2" → PERFECT MATCH
+           - Contains match: "capstone-seis-flask" contains ["capstone", "seis", "flask"] → MATCH
+           - Partial match: "kredipo" in description or readme → POSSIBLE MATCH
+
+        3. **Use the matched repository**:
+           - You have: name, full_name, url, description from STEP 4
+           - Extract files: get_file_contents(repository=full_name, file_path="README.md")
+           - Use actual file content in guide generation
+
+        **ORGANIZATION REPOSITORIES:**
+        - get_me() does NOT return organization information!
+        - **Use get_teams()** to discover user's organizations
+        - get_teams() returns: [{{"organization": {{"login": "ionify"}}}}, ...]
+        - Extract org names and search each: search_repositories("org:ionify")
+        - Example: User in "ionify" org:
+          * get_teams() → [{{"organization": {{"login": "ionify"}}}}]
+          * search_repositories("user:gemm123") → personal repos
+          * search_repositories("org:ionify") → org repos (tara, etc.)
+          * Combine both lists and match against user's query
+
+        **WHEN TO GENERATE A GUIDE (CRITICAL)**:
+        You MUST generate a guide if ANY of these conditions are met:
+        - Roadmap tools found relevant structure (search_roadmap_topics returned results)
+        - You successfully found GitHub repositories (via search_repositories)
+        - You extracted files from repositories (via get_file_contents)
+
+        **GUIDE STRUCTURE STRATEGY**:
+        1. **Use roadmap.sh for structure**: Call get_roadmap_structure() to get industry-standard topic order
+        2. **Use GitHub for examples**: Extract code from user's repositories for concrete examples
+        3. **Use Drive for context**: Get internal documentation if available (via extract_drive_content)
+        4. **Combine all three**: Roadmap structure + internal code examples + documentation = best guide
+
+        **ALWAYS GENERATE A GUIDE**:
+        - If roadmap structure found: Generate guide using roadmap structure + code examples (if any)
+        - If only GitHub found: Generate guide based on code structure + related roadmap
+        - If only roadmap found: Generate guide using roadmap structure + official resources
+        - Roadmaps have 7,800+ topics across 59 domains - you will ALWAYS find relevant structure
+
+        **WORK FAST AND EFFICIENTLY**:
+        - ALWAYS start with roadmap tools (instant ~1ms queries)
+        - Get user context early (get_me + get_teams + search_repositories)
+        - Extract files with get_file_contents for code examples
+        - Combine roadmap structure with internal code examples for best results
+
+        **CONTENT LENGTH GUIDELINES (GUIDES ARE SHORTER THAN COURSES):**
+        - Keep guide content concise and focused (aim for 1500-3000 words total)
+        - Include 1-2 key code examples (not full file dumps)
+        - Use code snippets (10-30 lines) rather than entire files
+        - Focus on the most important/illustrative sections
+        - If showing API responses, use shortened examples (3-5 items, not full responses)
+        - Remember: Guides are shorter and more direct than courses
+
+        **OUTPUT FORMAT - CRITICAL:**
+        You MUST return ONLY valid JSON. Do NOT include any explanatory text before or after the JSON.
+        Do NOT wrap the JSON in markdown code blocks (no ```json or ```).
+        Return the raw JSON object directly starting with {{ and ending with }}.
+
+        **JSON VALIDATION RULES - MUST FOLLOW:**
+        1. All strings MUST be properly quoted with double quotes (not single quotes)
+        2. All property names MUST be in double quotes
+        3. Do NOT use trailing commas (remove comma after last item in arrays/objects)
+        4. Properly escape ALL special characters in string values:
+           - Newlines in markdown: Use literal \\n (double backslash + n)
+           - Tabs: Use \\t (not \t)
+           - Backslashes: Use \\\\ (four backslashes to get one)
+           - Double quotes inside strings: Use \\" (backslash quote)
+           - Example: "content": "# Title\\n\\nThis is text with \\"quotes\\" and code:\\n```python\\nprint('hello')\\n```"
+        5. Numbers must be plain numbers without quotes
+        6. Booleans must be true/false (lowercase, no quotes)
+        7. Arrays must use square brackets: []
+        8. Objects must use curly braces: {{}}
+        9. Ensure ALL brackets and braces are properly closed
+        10. Test your JSON is valid before returning it
+
+        **CRITICAL - BEFORE GENERATING GUIDE:**
+        1. Review what you ACTUALLY found:
+           - What roadmap structure did you retrieve?
+           - What repositories did you find via search_repositories?
+           - What files did get_file_contents return?
+           - What URLs are in get_tracked_sources?
+        2. ONLY use information from those actual results
+        3. DO NOT invent:
+           - File paths you didn't extract
+           - Code you didn't retrieve
+           - Source URLs not in get_tracked_sources
+        4. If you have limited information:
+           - That's OK! Create guide with what you have
+           - Use roadmap structure as the foundation
+           - Reference repository generally (not specific fake files)
+           - Explain concepts based on repository description/README
+
+        Generate a concise guide in this EXACT JSON format:
+        {{
+            "title": "Descriptive Guide Title",
+            "description": "Brief overview based on discovered content (2-3 sentences)",
+            "content": "# Guide Title\\n\\n## Section 1\\n\\nBased on the [repository name] repository...\\n\\n**Key Concepts**: Explain concepts here without making up file paths.\\n\\nIf you extracted code with get_file_contents, THEN include:\\n```language\\n// Actual code you extracted\\nreal_code_here()\\n```\\n\\nOtherwise, explain concepts generally without fake file references.\\n\\n## Section 2\\n\\nContinue with more sections...\\n\\n## Conclusion\\n\\nSummary and next steps.",
             "source_from": [<<ACTUAL_SOURCES_FROM_get_tracked_sources>>]
         }}
 
-        **IMPORTANT GUIDELINES:**
-        1. The guide should be concise (aim for 1500-3000 words)
-        2. Use clear section headings in the markdown content
-        3. Include code examples where relevant
-        4. Focus on practical, actionable information
-        5. Keep explanations simple and direct
-        6. The content field should be a SINGLE markdown string with all sections
-        7. Do NOT create modules, lessons, or quizzes (those are for courses, not guides)
-        8. Return ONLY the JSON object, no additional text
+        **CRITICAL - source_from FIELD**:
+        - **STEP 1**: Call get_tracked_sources BEFORE generating the JSON
+        - **STEP 2**: Use ONLY the URLs returned by get_tracked_sources
+        - **STEP 3**: Put those EXACT URLs in the source_from array
+        - DO NOT create, invent, or hallucinate source paths
+        - DO NOT use paths like "internal/rag_knowledge_base/..." unless get_tracked_sources returned them
+        - If get_tracked_sources returns [] (empty array): use [] in source_from
 
-        **CONTENT STRUCTURE in Markdown:**
-        The content field should follow this structure:
-        ```markdown
-        # Introduction
-        Brief introduction to the topic
+        **Examples**:
+        - ✅ get_tracked_sources returns ["https://github.com/Reynxzz/graphflix"] → use exactly that
+        - ✅ get_tracked_sources returns [] → use "source_from": []
+        - ✅ get_tracked_sources returns ["rag_doc_id_123"] → use exactly that
+        - ❌ NEVER: Make up "internal/rag_knowledge_base/graphflix/..." when get_tracked_sources didn't return it
+        - ❌ NEVER: Assume sources exist without checking get_tracked_sources first
 
-        ## Prerequisites
-        What readers should know before starting
+        **Workflow**:
+        1. Call get_tracked_sources
+        2. If it returns sources: Use them in source_from
+        3. If it returns empty []: Put [] in source_from (don't invent sources)
+        4. Generate guide JSON with ACTUAL sources only
 
-        ## Section 1: Main Topic Area
-        Detailed explanation with examples
+        **GUIDE vs COURSE:**
+        - Guides are SHORTER (1500-3000 words) and more DIRECT
+        - Guides have a single "content" field with markdown
+        - Guides do NOT have modules, lessons, or quizzes
+        - Guides focus on practical "how-to" information
+        - Guides are quicker to consume than full courses
 
-        ### Subsection if needed
-        More specific details
-
-        ## Section 2: Another Topic Area
-        Continue with relevant sections
-
-        ## Best Practices
-        Tips and recommendations
-
-        ## Common Pitfalls
-        What to avoid
-
-        ## Conclusion
-        Summary and next steps
-        ```
-
-        Always call the discovery tools to find real content before generating the guide!
+        CRITICAL: All code examples must be real code from discovered repositories with proper attribution.
         """
 
     # Tool methods (same as course agent)
@@ -368,9 +628,6 @@ class GuideGenerationAgent:
             discovery_result = await self.source_manager.discover_content(topic)
 
             # Track discovered sources
-            for source_result in discovery_result['rag_results']:
-                self.source_tracker.add_source_result(source_result)
-
             for source_result in discovery_result['github_results']:
                 self.source_tracker.add_source_result(source_result)
 
@@ -385,10 +642,8 @@ class GuideGenerationAgent:
             return {
                 "total_sources_found": discovery_result['total_results'],
                 "sources_used": discovery_result['used_sources'],
-                "rag_results_count": len(discovery_result['rag_results']),
                 "github_results_count": len(discovery_result['github_results']),
                 "search_results_count": len(discovery_result.get('search_results', [])),
-                "discovery_strategy": self.settings.source_priority.value,
                 "validation_issues": validation_issues
             }
 
@@ -420,6 +675,128 @@ class GuideGenerationAgent:
         except Exception as e:
             logger.error(f"Repository content extraction failed: {e}")
             return {}
+
+    async def extract_drive_content(self, search_query: str) -> Dict[str, Any]:
+        """
+        Search and extract content from Google Drive files.
+
+        This tool automatically:
+        1. Uses MCP search tool to find relevant files
+        2. Lists all Drive resources to get file URIs
+        3. Matches search results with resources
+        4. Retrieves the file content via MCP resources
+        5. Returns formatted content ready for guide generation
+
+        Args:
+            search_query: Keywords to search for in Drive (e.g., "TARA prototype", "onboarding guide")
+
+        Returns:
+            Dict containing:
+            - files_found: Number of matching files with extracted content
+            - content: List of dicts with 'name', 'content', 'type' for each file
+            - source_urls: List of Drive view links for source_from tracking
+            - search_results: Original search results for reference
+
+        Example:
+            result = await extract_drive_content("TARA prototype")
+            # Returns content from "Rencana Pengembangan Prototype - TARA" document
+        """
+        logger.info(f"🔍 Extracting Drive content for query: {search_query}")
+
+        if not self.drive_tool or not self.drive_tool.is_available():
+            logger.warning("Drive tool not available")
+            return {
+                "files_found": 0,
+                "content": [],
+                "source_urls": [],
+                "error": "Google Drive integration not available"
+            }
+
+        try:
+            # New workflow: Use search tool directly (searches file names and content)
+            logger.info(f"Step 1: Searching Drive for '{search_query}'...")
+            matched_files = await self.drive_tool.search_files(search_query)
+
+            if not matched_files:
+                logger.warning(f"No Drive files found matching '{search_query}'")
+                return {
+                    "files_found": 0,
+                    "content": [],
+                    "source_urls": [],
+                    "message": f"No files found matching '{search_query}'"
+                }
+
+            logger.info(f"✅ Found {len(matched_files)} files matching query")
+
+            # Step 2: Extract content from matched files
+            logger.info("Step 2: Extracting content from matched files...")
+            extracted_content = []
+            source_urls = []
+
+            for matched_file in matched_files[:5]:  # Limit to 5 files
+                try:
+                    uri = matched_file.get("uri")
+                    name = matched_file.get("name")
+                    mime_type = matched_file.get("mimeType")
+
+                    if not uri:
+                        logger.warning(f"⚠️ No URI for file: {name}")
+                        continue
+
+                    logger.info(f"📄 Reading: {name}")
+
+                    # Get file content using new get_file method
+                    file_data = await self.drive_tool.get_file(uri)
+
+                    if file_data and file_data.get("content"):
+                        content_text = file_data.get("content", "")
+                        extracted_content.append({
+                            "name": name,
+                            "content": content_text,
+                            "type": mime_type,
+                            "uri": uri,
+                            "length": len(content_text)
+                        })
+
+                        # Convert gdrive:///fileId to Google Drive view link
+                        # URI format: gdrive:///15MwrpzIgLWDZxhNMcn-U5NEtzkQWHdQ-KfFbmyvQiqs
+                        file_id = uri.replace("gdrive:///", "")
+                        drive_view_link = f"https://drive.google.com/file/d/{file_id}/view"
+                        source_urls.append(drive_view_link)
+
+                        logger.info(f"✅ Extracted {len(content_text)} chars from: {name}")
+                        logger.info(f"📎 Drive link: {drive_view_link}")
+                    else:
+                        logger.warning(f"⚠️ No content extracted from: {name}")
+
+                except Exception as e:
+                    logger.warning(f"❌ Failed to read {matched_file.get('name', 'unknown')}: {e}")
+                    continue
+
+            # Step 3: Return results
+            result = {
+                "files_found": len(extracted_content),
+                "content": extracted_content,
+                "source_urls": source_urls,
+                "matched_files": [f.get("name", "unknown") for f in matched_files],
+                "total_matched": len(matched_files),
+                "summary": f"Successfully extracted content from {len(extracted_content)} of {len(matched_files)} matched files"
+            }
+
+            logger.info(f"🎉 {result['summary']}")
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Drive content extraction failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "files_found": 0,
+                "content": [],
+                "source_urls": [],
+                "error": str(e),
+                "fallback": f"Failed to extract Drive content for query '{search_query}'"
+            }
 
     def get_tracked_sources(self) -> List[str]:
         """Get all tracked source URLs and paths."""
@@ -490,13 +867,11 @@ class GuideGenerationAgent:
         """Get current agent configuration and status."""
         return {
             'agent_name': 'guide_generator',
-            'source_priority': self.settings.source_priority.value,
             'github_available': self.source_manager.github_tool.is_available(),
             'drive_available': self.drive_tool.is_available() if self.drive_tool else False,
-            'rag_available': self.source_manager.rag_tool is not None,
+            'roadmap_available': self.roadmap_tool.is_available() if self.roadmap_tool else False,
             'configuration_issues': self.settings.validate(),
             'max_repositories': self.settings.mcp.max_repositories,
-            'max_rag_results': self.settings.rag.max_results,
             'log_level': self.settings.log_level.value
         }
 

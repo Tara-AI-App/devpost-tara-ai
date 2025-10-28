@@ -930,7 +930,8 @@ class CourseGenerationAgent:
             "configuration": {
                 "source_priority": self.settings.source_priority.value,
                 "github_enabled": self.source_manager.github_tool.is_available(),
-                "rag_enabled": self.source_manager.rag_tool.is_available()
+                "drive_enabled": self.drive_tool.is_available() if self.drive_tool else False,
+                "roadmap_enabled": self.roadmap_tool.is_available() if self.roadmap_tool else False
             }
         }
 
