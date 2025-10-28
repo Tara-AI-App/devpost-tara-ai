@@ -183,16 +183,26 @@ async def run_adk_agent(
     prompt: str,
     github_token: str = None,
     drive_token: str = None,
-    max_retries: int = 3
+    max_retries: int = 3,
+    timeout: float = 480.0  # 8 minutes default timeout for agent execution
 ) -> str:
     """
     Execute agent using InMemoryRunner directly (no HTTP calls).
-    
+
     This function:
     1. Sets tokens in environment (for this request)
     2. Creates agent instance with user-specific tokens
-    3. Runs agent via InMemoryRunner
+    3. Runs agent via InMemoryRunner with timeout
     4. Extracts and returns the final text response
+
+    Args:
+        app_name: Name of the agent to run
+        user_id: User ID
+        prompt: User prompt
+        github_token: GitHub token
+        drive_token: Drive token
+        max_retries: Maximum number of retries for rate limits
+        timeout: Maximum execution time in seconds (default: 480s / 8 minutes)
     """
     # Store original tokens
     original_github_token = os.environ.get('GITHUB_PERSONAL_ACCESS_TOKEN')
@@ -244,7 +254,7 @@ async def run_adk_agent(
                 app_name=app_name
             )
 
-            # Step 2: Run agent
+            # Step 2: Run agent with timeout
             new_message = genai_types.Content(
                 role="user",
                 parts=[genai_types.Part(text=prompt)]
@@ -252,16 +262,29 @@ async def run_adk_agent(
 
             # Collect events and extract final text
             final_text = None
-            async for event in runner.run_async(
-                user_id=user_id,
-                session_id=session_id,
-                new_message=new_message
-            ):
-                if hasattr(event, 'content') and event.content:
-                    if hasattr(event.content, 'parts'):
-                        for part in event.content.parts:
-                            if hasattr(part, 'text') and part.text:
-                                final_text = part.text
+
+            # Wrap the agent execution with timeout (Python 3.10 compatible)
+            async def collect_agent_events():
+                nonlocal final_text
+                async for event in runner.run_async(
+                    user_id=user_id,
+                    session_id=session_id,
+                    new_message=new_message
+                ):
+                    if hasattr(event, 'content') and event.content:
+                        if hasattr(event.content, 'parts'):
+                            for part in event.content.parts:
+                                if hasattr(part, 'text') and part.text:
+                                    final_text = part.text
+
+            try:
+                await asyncio.wait_for(collect_agent_events(), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.error(f"Agent execution timed out after {timeout}s")
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Agent execution timed out after {timeout} seconds. This may happen with complex queries that require many API calls. Try simplifying your request or contact support."
+                )
 
             if not final_text:
                 raise HTTPException(
@@ -602,9 +625,13 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
 
+    # Configure uvicorn with appropriate timeouts
+    # Timeout should be longer than the agent execution timeout to avoid premature disconnection
     uvicorn.run(
         app,
         host="0.0.0.0",
         port=8000,
-        log_level="info"
+        log_level="info",
+        timeout_keep_alive=300,  # Keep connections alive for 5 minutes
+        timeout_graceful_shutdown=30,  # Wait 30s for graceful shutdown
     )

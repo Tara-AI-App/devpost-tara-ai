@@ -25,6 +25,7 @@ from ..config.settings import settings
 from ..utils.logger import logger
 from ..core.source_manager import SourceManager
 from ..core.enhanced_source_tracker import EnhancedSourceTracker
+from ..tools.roadmap_tool import RoadmapTool
 
 
 class CourseGenerationAgent:
@@ -51,6 +52,13 @@ class CourseGenerationAgent:
         self.drive_token = drive_token
         self.source_manager = SourceManager()
         self.source_tracker = EnhancedSourceTracker()
+
+        # Initialize Roadmap tool for learning path structure
+        self.roadmap_tool = RoadmapTool()
+        if self.roadmap_tool.is_available():
+            logger.info(f"Roadmap tool initialized successfully")
+        else:
+            logger.warning("Roadmap tool not available")
 
         # Initialize Drive tool separately if enabled and credentials are provided
         self.drive_tool = None
@@ -103,7 +111,6 @@ class CourseGenerationAgent:
         """Create the ADK agent with proper configuration."""
         tools = [
             FunctionTool(self.analyze_tech_stack),
-            FunctionTool(self.discover_sources),
             FunctionTool(self.extract_repository_content),
             FunctionTool(self.extract_drive_content),
             FunctionTool(self.get_tracked_sources),
@@ -111,6 +118,17 @@ class CourseGenerationAgent:
             FunctionTool(self.generate_search_queries),
             FunctionTool(self.save_course_to_file)
         ]
+
+        # Add Roadmap tools for learning structure
+        if self.roadmap_tool and self.roadmap_tool.is_available():
+            tools.extend([
+                FunctionTool(self.roadmap_tool.query_learning_structure),
+                FunctionTool(self.roadmap_tool.get_roadmap_structure),
+                FunctionTool(self.roadmap_tool.find_learning_resources),
+                FunctionTool(self.roadmap_tool.list_available_roadmaps),
+                FunctionTool(self.roadmap_tool.search_roadmap_topics)
+            ])
+            logger.info("Added 5 roadmap tools to agent")
 
         # Add GitHub MCP tools if available
         logger.info(f"Checking if GitHub MCP tools are available...")
@@ -182,130 +200,84 @@ class CourseGenerationAgent:
         - When user asks about "Tara", match it in your saved list!
 
         **CONFIGURATION:**
-        - Source Priority: {self.settings.source_priority.value}
         - Max Repositories: {self.settings.mcp.max_repositories}
-        - RAG Max Results: {self.settings.rag.max_results}
         - GitHub Tools Available: {self.source_manager.github_tool.is_available()}
         - Google Drive Tools Available: {self.drive_tool.is_available() if self.drive_tool else False}
+        - Roadmap Structure Tools Available: {self.roadmap_tool.is_available() if self.roadmap_tool else False}
 
-        **CONTENT DISCOVERY PROCESS:**
+        **COURSE GENERATION WORKFLOW:**
 
-        **STEP 0 (MANDATORY): ESTABLISH GITHUB USER CONTEXT**
-        - **YOU MUST ALWAYS call get_me FIRST** to get the authenticated GitHub username
+        **STEP 1: USE ROADMAP.SH STRUCTURE (ALWAYS START HERE)**
+        - **Call list_available_roadmaps()** to see available learning paths (59 roadmaps available)
+        - **Call search_roadmap_topics(keyword, roadmap)** to find relevant topics for the course subject
+        - **Call get_roadmap_structure(roadmap_id)** to get proper learning order for topics
+        - Use roadmap structure to organize course modules in industry-standard order
+        - **Roadmaps have 7,800+ topics** - you will ALWAYS find relevant structure
+
+        **STEP 2: ESTABLISH GITHUB USER CONTEXT**
+        - **Call get_me()** to get the authenticated GitHub username
         - This establishes context for which GitHub account is connected
         - Store the username for later repository searches
         - Example: get_me returns {{"login": "Reynxzz"}} → username is "Reynxzz"
-        - **DO NOT SKIP THIS STEP** - it's critical for finding user repositories
-        - If get_me fails, log a warning but continue to discover_sources
 
-        **STEP 0.5 (MANDATORY): GET USER'S ORGANIZATIONS**
+        **STEP 3: GET USER'S ORGANIZATIONS**
         - **Call get_teams()** (no parameters needed - uses authenticated user)
         - This returns all teams the user belongs to, each with organization info
         - Extract organization names from the response: team.organization.login
         - **Save the list of organization names** (e.g., ["ionify", "github", ...])
 
-        **STEP 0.6 (MANDATORY): GET ALL REPOSITORIES (PERSONAL + ORG)**
-        - **You MUST search ALL of these**:
+        **STEP 4: GET ALL REPOSITORIES (PERSONAL + ORG)**
+        - **Search ALL of these**:
           1. search_repositories("user:<username>") - lists personal repos
           2. For EACH organization from get_teams: search_repositories("org:<orgname>")
         - This returns the complete list of repositories with full details
         - **Save this combined list!** You will use it later to find exact matches
         - This list IS your source of truth for what repos exist
-        - When user asks about a project, match against this list to get the exact repository object
-        - **DO NOT SKIP THIS STEP** - without it you cannot find user's org repos
+
+        **STEP 5: EXTRACT FILES FROM REPOSITORIES**
+        - **If user asked about a specific project**: Match project name against your saved repo list
+        - **Extract files** with get_file_contents(repository="owner/repo-name", file_path="...")
+        - Extract README, code files, configuration files as needed
+
+        **STEP 6 (OPTIONAL): EXTRACT DRIVE CONTENT**
+        - **If Drive is available**: Call extract_drive_content(search_query)
+        - Use specific queries for better results (e.g., "TARA prototype")
+
+        **STEP 7: GENERATE COURSE**
+        - Combine: Roadmap structure + GitHub code examples + Drive documentation
+        - Call get_tracked_sources() to get actual source URLs
+        - Generate course JSON with proper attribution
 
         **Example Flow:**
         ```
         User: "Generate course about Tara project"
 
-        Step 0 (MANDATORY): Call get_me
-                → Returns: {{"login": "gemm123", "type": "User"}}
-
-        Step 0.5 (MANDATORY): Call get_teams()
-                → Returns: [
-                    {{"name": "Developers", "slug": "developers", "organization": {{"login": "ionify"}}}},
-                    {{"name": "Core", "slug": "core", "organization": {{"login": "github"}}}}
-                  ]
-                → Extract orgs: ["ionify", "github"]
-                → SAVE this list!
-
-        Step 0.6 (MANDATORY): Search ALL repositories
-                a) search_repositories("user:gemm123")
-                   → Returns: [{{"name": "bytesv2", "full_name": "gemm123/bytesv2", ...}}, ...]
-
-                b) search_repositories("org:ionify")
-                   → Returns: [{{"name": "tara", "full_name": "ionify/tara", ...}}, ...]
-
-                c) search_repositories("org:github")
-                   → Returns: [{{"name": "docs", "full_name": "github/docs", ...}}, ...]
-
-                → COMBINE all lists: [personal repos] + [ionify repos] + [github repos]
-                → SAVE combined list!
-
-        Step 1: Call discover_sources("Tara")
-                → github_results_count = 0 (because automatic search may not find it)
-
-        Step 2: Since github_results_count = 0 AND user mentioned "Tara":
-                → Look in your saved COMBINED repo list from Step 0.6
-                → Find "tara" in the list (from ionify org)
-                → Found: {{"name": "tara", "full_name": "ionify/tara"}}
-                → Extract files with get_file_contents(repository="ionify/tara", file_path="README.md")
-                → SUCCESS! ✅
+        Step 1: search_roadmap_topics("backend") → Find relevant roadmap
+        Step 2: get_me() → Returns: {{"login": "gemm123"}}
+        Step 3: get_teams() → Returns: [{{"organization": {{"login": "ionify"}}}}]
+        Step 4a: search_repositories("user:gemm123") → [personal repos]
+        Step 4b: search_repositories("org:ionify") → [{{"name": "tara", "full_name": "ionify/tara", ...}}]
+        Step 5: Match "tara" in saved list → Found!
+        Step 6: get_file_contents(repository="ionify/tara", file_path="README.md")
+        Step 7: extract_drive_content("TARA") → Get internal docs
+        Step 8: get_roadmap_structure("backend") → Get proper topic order
+        Step 9: Generate course with all sources
         ```
 
-        1. **After establishing GitHub context, call analyze_tech_stack AND discover_sources in PARALLEL**
+        **WORK FAST - NO DELAYS:**
+        - Roadmap queries are instant (~1ms)
+        - GitHub MCP tools are fast (direct API calls)
+        - No need to search for content - roadmaps provide all structure needed
+        - Just find user's repos → extract files → generate course
 
-        2. **Strictly evaluate what discover_sources ACTUALLY returned**:
-           - discover_sources searches both RAG and GitHub automatically
-           - Check rag_results_count: actual RAG sources found
-           - Check github_results_count: actual GitHub repos found
-           - Check total_sources_found: combined total
-           - **CRITICAL**: Only use sources that were ACTUALLY returned, never invent sources
+        **ROADMAP TOOLS (FOR COURSE STRUCTURE):**
+        - query_learning_structure: Get prerequisites and next topics for a subject
+        - get_roadmap_structure: Get proper learning order for a roadmap
+        - find_learning_resources: Find curated resources from roadmap.sh
+        - list_available_roadmaps: See available roadmaps (frontend, python, react, etc.)
+        - search_roadmap_topics: Search for topics by keyword
 
-        3. **IF github_results_count = 0 AND user asked about a project/repository**:
-           **⚠️ MANDATORY ACTION - DO NOT SKIP EVEN IF YOU HAVE OTHER SOURCES ⚠️**
-
-           **How to detect if user is asking about a project/repository**:
-           - User mentions: "project", "repo", "repository", "my", "from my repo"
-           - User uses hyphenated names: "graphflix", "capstone-seis-flask", "thinktok-pwa"
-           - User asks to "learn about X" where X looks like a code project name
-           - User mentions specific app/service names that aren't common tech terms
-           - **DEFAULT ASSUMPTION**: If query mentions a specific name (not a generic tech term), it's likely a GitHub repo
-
-           **Examples that should trigger GitHub search**:
-           - ✅ "help me learn about capstone-seis-flask project" → GitHub repo
-           - ✅ "help me learn about capstone-seis-flask" → GitHub repo (even without "project")
-           - ✅ "graphflix" → GitHub repo
-           - ✅ "my thinktok app" → GitHub repo
-           - ✅ "zyo-deploy" → GitHub repo
-           - ❌ "learn about React" → General tech term, not a repo
-           - ❌ "learn about machine learning" → General topic, not a repo
-
-           **Action Steps - USE YOUR SAVED REPO LIST FROM STEP 0.5**:
-           - **DO NOT call search_repositories again** - you already have the full list!
-           - You called search_repositories("user:<username>") in STEP 0.5
-           - That list has ALL user's repositories with complete details
-           - **MATCH the user's query against your saved list**:
-             1. Extract keywords from user query (e.g., "graphflix", "bytesv2", "capstone seis flask")
-             2. Look through your saved repo list from STEP 0.5
-             3. Find repos where name matches or contains the keywords
-             4. Use the matching repository object directly (it has full_name, url, description)
-           - Example: User says "bytesv2" → Find "bytesv2" in your list → Use that repo
-           - Example: User says "capstone seis flask" → Find "capstone-seis-flask" → Use that repo
-           - **If found in list**: Extract files immediately with get_file_contents(repository="owner/repo-name", ...)
-           - **If NOT in list**: Document that the repo doesn't exist in user's account
-
-        4. **Decision logic based on ACTUAL results**:
-           - ALWAYS try user's GitHub repo if user mentioned a project name
-           - After trying GitHub: If total_sources_found >= 2, proceed
-           - If total_sources_found < 2 after all attempts: Acknowledge insufficient content
-
-        5. **ALWAYS use get_tracked_sources** to get the actual source URLs that were found
-
-        6. **NEVER invent or hallucinate source paths** - only use what get_tracked_sources returns
-
-        **RAG TOOL (PRIORITY TOOL):**
-        - discover_sources: Search internal knowledge base and documentation for relevant context
+        Use these tools to structure courses based on industry-standard learning paths!
 
         **GITHUB MCP TOOLS (if available):**
         GitHub integration may provide these tools when connected:
@@ -358,50 +330,53 @@ class CourseGenerationAgent:
         ```
         
         **Complete Workflow for Course Generation with Drive:**
-        
+
         ```
         User: "Generate course about TARA prototype development"
-        
+
         SEQUENCE:
-        
-        1. discover_sources("TARA prototype")
-           → Returns: RAG results + GitHub repos
-        
-        2. extract_drive_content("TARA prototype")
+
+        1. search_roadmap_topics("backend") → Get relevant roadmap structure
+
+        2. Get GitHub context:
+           - get_me() → username
+           - get_teams() → organizations
+           - search_repositories() → find TARA repo
+
+        3. extract_drive_content("TARA prototype")
            → Searches Drive and extracts file contents automatically
            → Returns full content from matched files with metadata
-        
-        3. Generate course using ALL sources:
-           - RAG knowledge base (from step 1)
-           - GitHub code examples (from step 1)  
-           - Drive document content (from step 2)
-        
-        4. Add to source_from array (use Drive links from source_urls):
-           ["github.com/ionify/tara", 
+
+        4. Generate course using ALL sources:
+           - Roadmap structure (industry-standard learning path)
+           - GitHub code examples (from TARA repository)
+           - Drive document content (internal documentation)
+
+        5. Add to source_from array (use Drive links from source_urls):
+           ["github.com/ionify/tara",
             "https://drive.google.com/file/d/11E-BABqB4XscV7-9oZVg3MKqjjo_oPcGjxsxrTrfn9Q/view",
             "https://drive.google.com/file/d/15MwrpzIgLWDZxhNMcn-U5NEtzkQWHdQ-KfFbmyvQiqs/view"]
         ```
-        
+
         **Rules:**
         1. Call extract_drive_content() when you need Drive files for a topic
         2. Use specific queries for better results (e.g., "TARA prototype" vs "TARA")
         3. The tool returns source_urls with clickable Drive links
         4. File contents are automatically extracted and ready to use
         5. **IMPORTANT**: Add Drive links from source_urls to source_from array (not file names)
-        
+
         **Drive Content Types (Automatically Converted):**
         - Google Docs → Markdown (use directly in lessons)
         - Google Sheets → CSV (extract data/examples)
         - PDFs → Text (get specifications/proposals)
         - DOCX → Text (read documentation)
-        
+
         **⚠️ KEY PRINCIPLES (MUST FOLLOW) ⚠️:**
         1. **USE**: Call extract_drive_content() to search and get Drive files in one step
         2. **SPECIFIC**: Use specific queries for better results (e.g., "TARA prototype" not just "TARA")
         3. **SILENT**: Don't announce files to user - use content automatically
-        4. **ATTRIBUTION**: Add Drive file names to source_from array
-        5. **SEQUENCE**: discover_sources → extract_drive_content → generate course
-        
+        4. **ATTRIBUTION**: Add Drive links from source_urls to source_from array
+
         **Example of CORRECT Drive Usage:**
         ```
         ✅ extract_drive_content("TARA")     // Automatically searches and extracts
@@ -410,49 +385,36 @@ class CourseGenerationAgent:
 
         **CRITICAL - SOURCE VALIDATION (PREVENT HALLUCINATION):**
 
-        **What discover_sources does**:
-        - Searches BOTH RAG and GitHub automatically based on configured priority
-        - Returns ACTUAL results found (not assumptions)
-        - You MUST use only what it returns, never make up sources
-
         **How to handle different query types**:
 
-        1. **Internal/Company Projects** (e.g., "merlin", "caraml"):
-           - discover_sources searches RAG automatically
-           - If rag_results_count > 0: Use those RAG sources
-           - If rag_results_count = 0: Content truly doesn't exist in RAG
-           - DO NOT invent RAG sources that weren't returned
+        1. **User's Internal Projects** (e.g., "kredipo", "tara project", "analytics in kredipo"):
+           - STEP 1: Call search_roadmap_topics() to find relevant roadmap (e.g., "data-analyst", "machine-learning")
+           - STEP 2: Call get_me() to get authenticated username
+           - STEP 3: Call get_teams() to get user's organizations
+           - STEP 4: Call search_repositories("user:<username>") to list all personal repos
+           - STEP 5: Call search_repositories("org:<orgname>") for each organization
+           - STEP 6: Match project name against the combined repo list
+           - STEP 7: Extract files with get_file_contents()
+           - STEP 8: Combine roadmap structure + internal code examples
 
-        2. **User's Personal Projects** (e.g., "my graphflix"):
-           - discover_sources searches user's GitHub automatically (via source_manager)
-           - If github_results_count > 0: Use those GitHub repos
-           - If github_results_count = 0: Repo not found OR needs manual search
-           - Only if not found: Try manual search with search_repositories (use get_me username if available)
-           - If still not found: Acknowledge it doesn't exist, don't make it up
-
-        3. **Ambiguous queries** (e.g., "graphflix"):
-           - discover_sources searches both RAG and GitHub
-           - Use whatever ACTUAL results are returned
-           - Don't assume it's in RAG or GitHub - check the counts
+        2. **General Tech Topics** (e.g., "React", "Python", "Machine Learning"):
+           - STEP 1: Call search_roadmap_topics() to find relevant topics
+           - STEP 2: Call get_roadmap_structure() to get proper learning order
+           - STEP 3: Optionally: search user's GitHub for related code examples
+           - STEP 4: Combine roadmap structure with user's code examples if available
 
         **ABSOLUTE RULES TO PREVENT HALLUCINATION**:
-        - ✅ ONLY use sources returned by get_tracked_sources
-        - ✅ If total_sources_found = 0, acknowledge insufficient content
-        - ❌ NEVER create fake source paths like "internal/rag_knowledge_base/graphflix/..."
-        - ❌ NEVER assume content exists in RAG without checking rag_results_count
-        - ❌ NEVER assume repo exists in GitHub without checking github_results_count
-
-        **GOOGLE SEARCH TOOL (FINAL FALLBACK):**
-        - Automatically triggered when RAG and GitHub MCP provide insufficient results (< 3 total)
-        - Searches for educational content, tutorials, documentation, and guides
-        - Focuses on high-quality sources from reputable educational platforms
+        - ✅ ONLY use sources you actually retrieved (repos found, files extracted)
+        - ✅ ONLY reference files you extracted with get_file_contents()
+        - ❌ NEVER create fake source paths or file references
+        - ❌ NEVER assume repo exists without searching for it first
 
 
         **CRITICAL - CODE EXTRACTION FROM REPOSITORIES:**
 
-        **STEP-BY-STEP FILE EXTRACTION PROCESS:**
+        **FILE EXTRACTION PROCESS:**
 
-        1. **After finding a GitHub repository**, you MUST extract code files:
+        1. **After finding a GitHub repository**, extract code files:
            - Call get_file_contents(repository="owner/repo", file_path="README.md") for the README
            - Call get_file_contents(repository="owner/repo", file_path="package.json") for package.json
            - Call get_file_contents(repository="owner/repo", file_path="**/*.ts") for TypeScript files
@@ -464,164 +426,87 @@ class CourseGenerationAgent:
            - The tool returns the actual file content as a string
            - If file doesn't exist, it returns empty string or error
            - You need to call it MULTIPLE times for multiple files
-           - DO NOT expect extract_repository_content to return files - that's just a helper
-           - YOU must call get_file_contents directly for each file you want
 
         3. **To include code examples in the course**:
            - MUST call get_file_contents(repository, file_path) to extract the code
            - ONLY reference files that get_file_contents successfully returned
            - If get_file_contents returns empty or fails: DO NOT reference that file
 
-        4. **To reference file paths in content**:
-           - ❌ NEVER make up file paths like "algorithms/content_recommend.js"
-           - ❌ NEVER assume files exist without calling get_file_contents
-           - ✅ ONLY reference: Repository URL (e.g., "https://github.com/user/repo")
-           - ✅ OR files you extracted with get_file_contents
-
-        5. **Valid references**:
+        4. **Valid references**:
            - ✅ "From: https://github.com/Reynxzz/graphflix"
            - ✅ "Based on the Reynxzz/graphflix repository"
            - ❌ "From: https://github.com/Reynxzz/graphflix/algorithms/content_recommend.js" (unless you extracted it)
+           - ❌ NEVER make up file paths you didn't extract
 
-        6. **If you couldn't extract files**:
-           - Just reference the repository generally
-           - Don't make up specific file paths
-           - Example: "Based on the graphflix repository structure..."
+        **MATCHING USER QUERIES TO REPOSITORIES:**
 
-        **EXAMPLE WORKFLOW FOR EXTRACTING CODE:**
-        ```
-        1. User asks: "Generate course about graphflix project"
-        2. Call discover_sources → github_results_count = 0
-        3. If get_me available: Call get_me → returns "Reynxzz"
-        4. Call search_repositories("repo:Reynxzz/graphflix") OR search_repositories("graphflix") → finds repository
-        5. NOW EXTRACT FILES (critical step):
-           - Call get_file_contents(repository="Reynxzz/graphflix", file_path="README.md")
-           - Call get_file_contents(repository="Reynxzz/graphflix", file_path="package.json")
-           - Call get_file_contents(repository="Reynxzz/graphflix", file_path="src/index.ts")
-           - Call get_file_contents(repository="Reynxzz/graphflix", file_path="src/config.ts")
-        6. Use the ACTUAL file contents returned in the course
-        7. Call get_tracked_sources to get repository URL
-        8. Generate course with real code examples
-        ```
+        **When user mentions a specific project name** (like "graphflix", "thinktok", "tara", "kredipo"):
 
-        **MANDATORY SEARCH STRATEGY - USE THE REPO LIST FROM STEP 0.5:**
-
-        **When user mentions a specific project name** (like "graphflix", "thinktok", "zyo-deploy"):
-
-        **WORKFLOW CHECK**:
-        - ✅ You called get_me in STEP 0 (got username)
-        - ✅ You called search_repositories("user:<username>") in STEP 0.5 (got full repo list)
-        - ✅ You have the complete list saved in memory
-
-        **WHEN discover_sources returns github_results_count = 0**:
-        - **DO NOT panic** - this is expected! discover_sources doesn't search well
-        - **DO NOT call search_repositories again** - you already have everything!
-        - **USE YOUR SAVED LIST** from STEP 0.5
-
-        **MATCHING PROCESS**:
         1. **Extract keywords from user query**:
            - "bytesv2 project" → keywords: ["bytesv2"]
            - "capstone seis flask" → keywords: ["capstone", "seis", "flask"]
            - "help me learn about graphflix" → keywords: ["graphflix"]
+           - "analytics side of credit scoring project in kredipo" → keywords: ["kredipo", "credit", "scoring"]
 
-        2. **Search your saved repo list** from STEP 0.5:
+        2. **Search your saved repo list** from STEP 4:
            - Exact name match: repo.name == "bytesv2" → PERFECT MATCH
            - Contains match: "capstone-seis-flask" contains ["capstone", "seis", "flask"] → MATCH
-           - Partial match: "bytesv2" contains "bytes" → POSSIBLE MATCH
+           - Partial match: "kredipo" in description or readme → POSSIBLE MATCH
 
         3. **Use the matched repository**:
-           - You have: name, full_name, url, description from STEP 0.5
+           - You have: name, full_name, url, description from STEP 4
            - Extract files: get_file_contents(repository=full_name, file_path="README.md")
-           - NO NEED to search again!
+           - Use actual file content in course generation
 
-        **EXAMPLES OF CORRECT EXECUTION**:
+        **EXAMPLE WORKFLOW:**
         ```
-        Step 0: get_me → username = "gemm123"
-        Step 0.5: search_repositories("user:gemm123") → saved list:
-                  [
-                    (name: "bytesv2", full_name: "gemm123/bytesv2"),
-                    (name: "graphflix", full_name: "gemm123/graphflix"),
-                    (name: "capstone-seis-flask", full_name: "gemm123/capstone-seis-flask")
-                  ]
+        User: "Generate course about graphflix project"
 
-        User: "bytesv2 project"
-        Step 1: discover_sources → github_results_count = 0
-        Step 2: Match "bytesv2" in saved list → FOUND!
-        Step 3: Use repo: name="bytesv2", full_name="gemm123/bytesv2"
-        Step 4: get_file_contents(repository="gemm123/bytesv2", file_path="README.md")
-        → SUCCESS ✅
-
-        User: "capstone seis flask"
-        Step 1: discover_sources → github_results_count = 0
-        Step 2: Match ["capstone", "seis", "flask"] in saved list → "capstone-seis-flask" FOUND!
-        Step 3: Use repo: name="capstone-seis-flask", full_name="gemm123/capstone-seis-flask"
-        Step 4: get_file_contents(repository="gemm123/capstone-seis-flask", file_path="README.md")
-        → SUCCESS ✅
+        Step 1: search_roadmap_topics("frontend") → Find React roadmap
+        Step 2: get_me() → Returns: {{"login": "Reynxzz"}}
+        Step 3: get_teams() → Returns: []
+        Step 4: search_repositories("user:Reynxzz") → saved list includes "graphflix"
+        Step 5: Match "graphflix" in saved list → FOUND!
+        Step 6: get_file_contents(repository="Reynxzz/graphflix", file_path="README.md")
+        Step 7: get_file_contents(repository="Reynxzz/graphflix", file_path="package.json")
+        Step 8: get_roadmap_structure("frontend") → Get proper topic order
+        Step 9: Generate course with roadmap structure + graphflix code examples
         ```
 
-        **CRITICAL RULES**:
-        - ❌ DO NOT call search_repositories again - you have the list!
-        - ❌ DO NOT rely on discover_sources for user repos - it doesn't work well
-        - ✅ ALWAYS use your saved list from STEP 0.5
-        - ✅ Match user keywords against repo names in the list
-        - ✅ Use the full_name field for get_file_contents calls
-        - ✅ Include BOTH personal and organization repos in your search
-
-        **ORGANIZATION REPOSITORIES**:
-        - **CRITICAL**: get_me does NOT return organization information!
-        - **Solution**: Use get_teams() to discover user's organizations
+        **ORGANIZATION REPOSITORIES:**
+        - get_me() does NOT return organization information!
+        - **Use get_teams()** to discover user's organizations
         - get_teams() returns: [{{"organization": {{"login": "ionify"}}}}, ...]
         - Extract org names and search each: search_repositories("org:ionify")
-
-        **Complete Workflow**:
-        1. get_teams() → get list of orgs user belongs to
-        2. search_repositories("user:<username>") → personal repos
-        3. For each org: search_repositories("org:<orgname>") → org repos
-        4. Combine all lists
-
         - Example: User in "ionify" org:
           * get_teams() → [{{"organization": {{"login": "ionify"}}}}]
           * search_repositories("user:gemm123") → personal repos
           * search_repositories("org:ionify") → org repos (tara, etc.)
-          * Combine both lists
-        - When matching, check BOTH lists for the user's query
-
-        **STEP 3: For Internal Projects** (when rag_results_count = 0):
-        - Try generate_search_queries for alternative terms
-        - Call discover_sources again with alternative query
-        - If still rag_results_count = 0: Content truly not in knowledge base
-
-        **STEP 4: FINAL FALLBACK**
-        - If total_sources_found < 3: Google Search activates automatically
-        - Use web content as supplementary material
-
-        **CRITICAL: Don't give up before trying manual GitHub search!**
+          * Combine both lists and match against user's query
 
         **WHEN TO GENERATE A COURSE (CRITICAL)**:
         You MUST generate a course if ANY of these conditions are met:
-        - total_sources_found >= 1 (even if some sources are "low quality")
-        - rag_results_count >= 1
-        - github_results_count >= 1
-        - You successfully called search_repositories and found ANY repository
-        - get_tracked_sources returns ANY non-empty list
+        - Roadmap tools found relevant structure (search_roadmap_topics returned results)
+        - You successfully found GitHub repositories (via search_repositories)
+        - You extracted files from repositories (via get_file_contents)
 
-        **NEVER refuse to generate a course if**:
-        - You found RAG sources (even if marked "low quality" - use them anyway)
-        - You found GitHub repositories (even if couldn't extract all files)
-        - discover_sources returned ANY results
-        - ❌ WRONG: "couldn't find sufficient content" when total_sources_found > 0
-        - ❌ WRONG: Refusing due to "low quality" sources - use them anyway
+        **COURSE STRUCTURE STRATEGY**:
+        1. **Use roadmap.sh for structure**: Call get_roadmap_structure() to get industry-standard topic order
+        2. **Use GitHub for examples**: Extract code from user's repositories for concrete examples
+        3. **Use Drive for context**: Get internal documentation if available (via extract_drive_content)
+        4. **Combine all three**: Roadmap structure + internal code examples + documentation = best course
 
-        **CORRECT RESPONSES**:
-        - If ANY sources found: Generate course using those sources
-        - Only if total_sources_found = 0 after ALL attempts: Then say "couldn't find content"
+        **ALWAYS GENERATE A COURSE**:
+        - If roadmap structure found: Generate course using roadmap structure + code examples (if any)
+        - If only GitHub found: Generate course based on code structure + related roadmap
+        - If only roadmap found: Generate course using roadmap structure + official resources
+        - Roadmaps have 7,800+ topics across 59 domains - you will ALWAYS find relevant structure
 
-        **IMPORTANT EFFICIENCY RULES**:
-        - Always prioritize RAG tool (internal context) first using discover_sources
-        - GitHub search automatically scopes to the authenticated user's repositories when possible
-        - The get_me tool is optional - if not available, proceed without it
-        - If discover_sources returns sufficient results, proceed directly to course generation
-        - Always prefer internal RAG context over external GitHub sources when available
+        **WORK FAST AND EFFICIENTLY**:
+        - ALWAYS start with roadmap tools (instant ~1ms queries)
+        - Get user context early (get_me + get_teams + search_repositories)
+        - Extract files with get_file_contents for code examples
+        - Combine roadmap structure with internal code examples for best results
 
         **COURSE GENERATION REQUIREMENTS:**
         - Use only discovered content - NO templates or fallbacks
@@ -664,8 +549,9 @@ class CourseGenerationAgent:
 
         **CRITICAL - BEFORE GENERATING COURSE:**
         1. Review what you ACTUALLY found:
-           - What did discover_sources return?
-           - What did get_file_contents return (if called)?
+           - What roadmap structure did you retrieve?
+           - What repositories did you find via search_repositories?
+           - What files did get_file_contents return?
            - What URLs are in get_tracked_sources?
         2. ONLY use information from those actual results
         3. DO NOT invent:
@@ -674,6 +560,7 @@ class CourseGenerationAgent:
            - Source URLs not in get_tracked_sources
         4. If you have limited information:
            - That's OK! Create course with what you have
+           - Use roadmap structure as the foundation
            - Reference repository generally (not specific fake files)
            - Explain concepts based on repository description/README
 
@@ -682,7 +569,7 @@ class CourseGenerationAgent:
             "title": "Descriptive Course Title",
             "description": "Course overview based on discovered content",
             "difficulty": "Beginner|Intermediate|Advanced",
-            "estimated_duration": 10,
+            "estimated_duration": 1,
             "learning_objectives": ["objective1", "objective2", ...],
             "skills": ["skill1", "skill2", "skill3", ...],
             "modules": [
@@ -805,9 +692,6 @@ class CourseGenerationAgent:
             discovery_result = await self.source_manager.discover_content(topic)
 
             # Track discovered sources
-            for source_result in discovery_result['rag_results']:
-                self.source_tracker.add_source_result(source_result)
-
             for source_result in discovery_result['github_results']:
                 self.source_tracker.add_source_result(source_result)
 
@@ -822,10 +706,8 @@ class CourseGenerationAgent:
             return {
                 "total_sources_found": discovery_result['total_results'],
                 "sources_used": discovery_result['used_sources'],
-                "rag_results_count": len(discovery_result['rag_results']),
                 "github_results_count": len(discovery_result['github_results']),
                 "search_results_count": len(discovery_result.get('search_results', [])),
-                "discovery_strategy": self.settings.source_priority.value,
                 "validation_issues": validation_issues
             }
 
@@ -1077,13 +959,11 @@ class CourseGenerationAgent:
         """Get comprehensive configuration and status information."""
         return {
             "agent_name": self.settings.name,
-            "source_priority": self.settings.source_priority.value,
             "github_available": self.source_manager.github_tool.is_available(),
             "drive_available": self.drive_tool.is_available() if self.drive_tool else False,
-            "rag_available": self.source_manager.rag_tool.is_available(),
+            "roadmap_available": self.roadmap_tool.is_available() if self.roadmap_tool else False,
             "configuration_issues": self.settings.validate(),
             "max_repositories": self.settings.mcp.max_repositories,
-            "max_rag_results": self.settings.rag.max_results,
             "log_level": self.settings.log_level.value
         }
 

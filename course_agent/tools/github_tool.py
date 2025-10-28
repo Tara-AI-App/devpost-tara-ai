@@ -61,6 +61,11 @@ class GitHubMCPTool(RepositoryTool):
 
             logger.info("Creating MCP toolset...")
 
+            connect_timeout = float(os.getenv("MCP_CONNECT_TIMEOUT", "60.0"))
+            read_timeout = float(os.getenv("MCP_READ_TIMEOUT", "300.0"))
+            logger.info(f"MCP timeout configuration: connect={connect_timeout}s, read={read_timeout}s")
+            logger.info("Note: Timeouts are managed at client request level, not httpx level")
+
             # Use exact pattern from official example to avoid serialization issues
             self._mcp_tools = McpToolset(
                 connection_params=StreamableHTTPConnectionParams(

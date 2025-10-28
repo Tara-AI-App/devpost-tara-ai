@@ -175,7 +175,6 @@ class GoogleDriveMCPTool(RepositoryTool):
             
             request_json = json.dumps(request) + "\n"
             
-            # Run MCP server container with stdio transport
             result = subprocess.run(
                 [
                     "docker", "run", "-i", "--rm",
@@ -187,7 +186,7 @@ class GoogleDriveMCPTool(RepositoryTool):
                 input=request_json,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=90
             )
             
             if result.returncode != 0:
@@ -325,7 +324,7 @@ class GoogleDriveMCPTool(RepositoryTool):
                 input=request_json,
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=180
             )
             
             if result.returncode != 0:

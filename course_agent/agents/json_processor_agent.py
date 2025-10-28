@@ -70,7 +70,7 @@ def create_json_processor_agent() -> Agent:
     5. Set estimated_duration as a number (not string)
     6. Set module and lesson indices as numbers
     7. If any field is missing, use reasonable defaults:
-       - estimated_duration: 10
+       - estimated_duration: 1
        - skills: []
        - source_from: []
 

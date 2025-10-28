@@ -5,6 +5,9 @@ Course Generator Agent Package with Source Tracking - Version 2.0
 # Import from the refactored agent
 from .agent import root_agent, course_agent_instance, get_agent_status
 
+# Import new modular agent
+from .agents.course_agent import CourseGenerationAgent, create_course_agent
+
 # Import new configuration system
 from .config.settings import settings
 from .core.enhanced_source_tracker import EnhancedSourceTracker
@@ -31,6 +34,8 @@ __all__ = [
     "root_agent",
     "course_agent_instance",
     "get_agent_status",
+    "CourseGenerationAgent",
+    "create_course_agent",
     "config",
     "settings",
     "SourceTracker",
