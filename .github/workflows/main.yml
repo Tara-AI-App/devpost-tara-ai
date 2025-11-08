@@ -95,11 +95,11 @@ jobs:
             --min-instances=0 \
             --max-instances=2 \
             --timeout=3600 \
-            --cpu=2 \
-            --memory=4Gi \
             --container tara-ai \
             --image "${{ env.FULL_IMAGE_TAG_SHA }}" \
             --port 8000 \
+            --cpu=2 \
+            --memory=4Gi \
             --env-vars-file=env_vars_final.yaml \
             --container drive-mcp \
             --image qais004/devpost-mcp-drive:latest \
