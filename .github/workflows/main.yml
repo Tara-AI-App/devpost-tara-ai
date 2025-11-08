@@ -74,9 +74,9 @@ jobs:
         run: |-
           # Create environment variables file to handle special characters
           cat > env_vars.yaml << 'EOF'
-          ENABLE_DRIVE_MCP: true
-          PYTHONUNBUFFERED: 1
-          MCP_DRIVE_URL: http://localhost:9000
+          ENABLE_DRIVE_MCP: "true"
+          PYTHONUNBUFFERED: "1"
+          MCP_DRIVE_URL: "http://localhost:9000"
           EOF
           
           # Substitute environment variables in the file
