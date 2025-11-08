@@ -80,27 +80,16 @@ class GuideGenerationAgent:
 
     def _initialize_drive_tool(self):
         """Initialize Google Drive MCP tool."""
-        from course_agent.tools.drive_tool import GoogleDriveMCPTool, CredentialsManager
+        from course_agent.tools.drive_tool import GoogleDriveMCPTool
         import os
 
         try:
             logger.info(f"Initializing Google Drive MCP tool for user {self.user_id}")
 
-            # Use configurable credentials base path
-            credentials_base = os.getenv("CREDENTIALS_BASE_PATH", "./credentials")
-            logger.info(f"Using credentials base path: {credentials_base}")
-
-            # Save credentials using CredentialsManager
-            credentials_manager = CredentialsManager(base_path=credentials_base)
-            credentials_path = credentials_manager.save_drive_credentials(
-                user_id=self.user_id,
-                drive_token=self.drive_token
-            )
-
-            # Initialize Drive tool with credentials
+            # Initialize Drive tool with access token (no file storage!)
             self.drive_tool = GoogleDriveMCPTool(
                 user_id=self.user_id,
-                credentials_path=credentials_path
+                access_token=self.drive_token
             )
 
             logger.info(f"Drive tool initialized: {self.drive_tool.is_available()}")

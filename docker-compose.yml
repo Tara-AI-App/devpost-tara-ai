@@ -1,4 +1,4 @@
-# Docker compose file for Linux/Debian deployment
+# Docker compose file for Linux/Debian deployment with MCP Drive sidecar
 version: '3.8'
 
 services:
@@ -6,19 +6,12 @@ services:
     build: .
     ports:
       - "8000:8000"
-    volumes:
-      # Mount Docker socket to allow container to run other containers
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /home/qais_jabbar/drive-credentials:/credentials
-      # - /Users/qais/Documents/Hackaton/credentials:/credentials
     environment:
       - PYTHONUNBUFFERED=1
-      - CREDENTIALS_BASE_PATH=/credentials
-      - HOST_CREDENTIALS_PATH=/home/qais_jabbar/drive-credentials 
-      # - HOST_CREDENTIALS_PATH=/Users/qais/Documents/Hackaton/credentials
-      - DOCKER_NETWORK=tara-ai-ml-agent_course-agent-network 
       - ENABLE_DRIVE_MCP=true
-    # user: "0:0"
+      - MCP_DRIVE_URL=http://mcp-drive-sidecar:9000
+    depends_on:
+      - mcp-drive-sidecar
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
@@ -26,6 +19,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    networks:
+      - course-agent-network
+
+  mcp-drive-sidecar:
+    image: qais004/devpost-mcp-drive:latest
+    environment:
+      - SERVER_MODE=http
+      - PORT=9000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     networks:
       - course-agent-network
 
